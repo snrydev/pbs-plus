@@ -3,12 +3,12 @@
 package agentfs
 
 import (
-  "errors"
 	"fmt"
 	"strings"
 	"unsafe"
 
 	"github.com/pbs-plus/pbs-plus/internal/agent/agentfs/types"
+	"github.com/pkg/errors"
 	"golang.org/x/sys/windows"
 )
 
