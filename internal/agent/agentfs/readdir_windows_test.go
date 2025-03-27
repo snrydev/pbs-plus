@@ -154,8 +154,8 @@ func testLargeDirectory(t *testing.T, tempDir string) {
 		t.Fatalf("Failed to decode directory entries: %v", err)
 	}
 
-	if len(entries) != 10000 {
-		t.Errorf("Expected 10000 entries, got %d", len(entries))
+	if len(entries) != 200000 {
+		t.Errorf("Expected 200000 entries, got %d", len(entries))
 	}
 }
 
