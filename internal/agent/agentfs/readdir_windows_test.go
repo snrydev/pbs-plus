@@ -135,7 +135,7 @@ func testLargeDirectory(t *testing.T, tempDir string) {
 		t.Fatalf("Failed to create large directory: %v", err)
 	}
 
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < 200000; i++ {
 		fileName := filepath.Join(largeDir, "file"+strconv.Itoa(i))
 		if err := os.WriteFile(fileName, []byte("test content"), 0644); err != nil {
 			t.Fatalf("Failed to create file %s: %v", fileName, err)
