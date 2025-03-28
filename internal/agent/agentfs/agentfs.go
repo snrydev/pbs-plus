@@ -99,5 +99,17 @@ func (s *AgentFSServer) Close() {
 	}
 
 	s.closeFileHandles()
+	s.closeFolderHandles()
 	s.ctxCancel()
 }
+
+func (s *AgentFSServer) closeFolderHandles() {
+	s.dirHandles.ForEach(func(u uint64, sds *SeekableDirStream) bool {
+		sds.Close()
+		s.dirHandles.Del(u)
+		return true
+	})
+
+	s.dirHandles.Clear()
+}
+

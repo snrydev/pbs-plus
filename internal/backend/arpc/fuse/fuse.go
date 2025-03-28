@@ -393,7 +393,7 @@ func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 func (n *Node) OpendirHandle(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	handle, err := n.fs.OpenDir(n.getPath(), flags)
 	if err != nil {
-		return 0, 0, syscall.EIO
+		return 0, 0, fs.ToErrno(err)
 	}
 
 	return &FileHandle{
