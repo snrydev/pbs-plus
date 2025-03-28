@@ -468,10 +468,7 @@ func (fh *FileHandle) Readdirent(ctx context.Context) (*fuse.DirEntry, syscall.E
 		return nil, fs.ToErrno(err)
 	}
 
-	return &fuse.DirEntry{
-		Name: entry.Name,
-		Mode: entry.Mode,
-	}, 0
+	return &entry, 0
 }
 
 func (fh *FileHandle) Seekdir(ctx context.Context, off uint64) syscall.Errno {

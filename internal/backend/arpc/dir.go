@@ -6,6 +6,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/pbs-plus/pbs-plus/internal/agent/agentfs/types"
 	"github.com/pbs-plus/pbs-plus/internal/syslog"
 )
@@ -50,27 +51,43 @@ func (fs *ARPCFS) OpenDir(filename string, flags uint32) (types.HandleId, error)
 	return resp, nil
 }
 
-func (fs *ARPCFS) Readdirent(fh types.HandleId) (types.AgentDirEntry, error) {
+func (fs *ARPCFS) Readdirent(fh types.HandleId) (fuse.DirEntry, error) {
 	if fs.session == nil {
 		syslog.L.Error(os.ErrInvalid).
 			WithMessage("arpc session is nil").
 			WithJob(fs.JobId).
 			Write()
-		return types.AgentDirEntry{}, syscall.ENOENT
+		return fuse.DirEntry{}, syscall.ENOENT
 	}
 
 	var resp types.AgentDirEntry
 	raw, err := fs.session.CallMsgWithTimeout(1*time.Minute, fs.JobId+"/Readdirent", &fh)
 	if err != nil {
-		return types.AgentDirEntry{}, syscall.ENOENT
+		return fuse.DirEntry{}, syscall.ENOENT
 	}
 
 	err = resp.Decode(raw)
 	if err != nil {
-		return types.AgentDirEntry{}, syscall.ENOENT
+		return fuse.DirEntry{}, syscall.ENOENT
+
 	}
 
-	return resp, nil
+	mode := os.FileMode(resp.Mode)
+	modeBits := uint32(0)
+
+	switch {
+	case mode.IsDir():
+		modeBits = fuse.S_IFDIR
+	case mode&os.ModeSymlink != 0:
+		modeBits = fuse.S_IFLNK
+	default:
+		modeBits = fuse.S_IFREG
+	}
+
+	return fuse.DirEntry{
+		Name: resp.Name,
+		Mode: modeBits,
+	}, nil
 }
 
 func (fs *ARPCFS) SeekDir(fh types.HandleId, off uint64) error {
