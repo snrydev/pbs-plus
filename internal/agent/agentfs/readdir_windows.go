@@ -313,6 +313,11 @@ func (ds *SeekableDirStream) fillBuffer(restart bool) error {
 	ds.currentOffset = 0
 	ds.bytesInBuf = 0
 
+	// Explicitly zero the buffer before the API call to avoid stale data issues.
+	for i := range ds.buffer {
+		ds.buffer[i] = 0
+	}
+
 	var ioStatusBlock IoStatusBlock
 
 	ntStatus, _, _ := ntQueryDirectoryFile.Call(
@@ -335,8 +340,16 @@ func (ds *SeekableDirStream) fillBuffer(restart bool) error {
 	case STATUS_SUCCESS:
 		ds.bytesInBuf = ioStatusBlock.Information
 		if ds.bytesInBuf == 0 {
+			// Success but no bytes read means end of directory
 			ds.eof = true
 			return io.EOF
+		}
+		// Sanity check: bytesInBuf should not exceed buffer length
+		if ds.bytesInBuf > uintptr(len(ds.buffer)) {
+			ds.eof = true
+			ds.lastNtStatus = uintptr(syscall.EIO) // Indicate data corruption/overflow
+			syslog.L.Error(fmt.Errorf("[DEBUG fillBuffer] NtQueryDirectoryFile SUCCESS but returned more bytes (%d) than buffer size (%d) - path: %s", ds.bytesInBuf, len(ds.buffer), ds.path)).Write()
+			return syscall.EIO
 		}
 		ds.eof = false
 		return nil
@@ -347,11 +360,14 @@ func (ds *SeekableDirStream) fillBuffer(restart bool) error {
 		return io.EOF
 
 	default:
+		// Any other status is an error
 		ds.eof = true
 		ds.bytesInBuf = 0
 		syslog.L.Error(fmt.Errorf("[DEBUG fillBuffer] NtQueryDirectoryFile FAIL - path: %s, ntStatus: 0x%X", ds.path, ntStatus)).Write()
+
+		// Map to a Go error if possible
 		switch ntStatus {
-		case STATUS_NO_SUCH_FILE:
+		case STATUS_NO_SUCH_FILE: // Can happen if dir deleted between calls?
 			return os.ErrNotExist
 		case STATUS_ACCESS_DENIED:
 			return os.ErrPermission
