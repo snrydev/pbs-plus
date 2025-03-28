@@ -177,13 +177,16 @@ type SeekableDirStream struct {
 func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStream, error) {
 	ntPath := convertToNTPath(path)
 
-	pathUTF16, err := syscall.UTF16PtrFromString(ntPath)
-	if err != nil {
-		return nil, &os.PathError{Op: "UTF16PtrFromString", Path: path, Err: err}
+	pathUTF16 := utf16.Encode([]rune(ntPath))
+	if len(pathUTF16) == 0 || pathUTF16[len(pathUTF16)-1] != 0 {
+		pathUTF16 = append(pathUTF16, 0)
 	}
 
 	var unicodeString UnicodeString
-	rtlInitUnicodeString.Call(uintptr(unsafe.Pointer(&unicodeString)), uintptr(unsafe.Pointer(pathUTF16)))
+	rtlInitUnicodeString.Call(
+		uintptr(unsafe.Pointer(&unicodeString)),
+		uintptr(unsafe.Pointer(&pathUTF16[0])),
+	)
 
 	var objectAttributes ObjectAttributes
 	objectAttributes.Length = uint32(unsafe.Sizeof(objectAttributes))
@@ -194,7 +197,7 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 	var ioStatusBlock IoStatusBlock
 
 	desiredAccess := uintptr(FILE_LIST_DIRECTORY | syscall.SYNCHRONIZE)
-	shareAccess := uintptr(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+	shareAccess := uintptr(FILE_SHARE_READ | FILE_SHARE_WRITE)
 	createOptions := uintptr(FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT)
 	createDisposition := uintptr(OPEN_EXISTING)
 
@@ -385,13 +388,19 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 			if ds.eof {
 				return types.AgentDirEntry{}, io.EOF
 			}
+
 			if ds.lastNtStatus != STATUS_SUCCESS && ds.lastNtStatus != STATUS_NO_MORE_FILES {
 				return types.AgentDirEntry{}, fmt.Errorf("previous NtQueryDirectoryFile failed: NTSTATUS 0x%X", ds.lastNtStatus)
 			}
+
 			fillErr := ds.fillBuffer(false)
 			if fillErr != nil {
-				return types.AgentDirEntry{}, fillErr
+				if fillErr == io.EOF {
+					return types.AgentDirEntry{}, io.EOF
+				}
+				continue
 			}
+
 			if ds.bytesInBuf == 0 || ds.currentOffset >= int(ds.bytesInBuf) {
 				ds.eof = true
 				return types.AgentDirEntry{}, io.EOF
