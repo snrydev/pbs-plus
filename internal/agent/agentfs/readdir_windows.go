@@ -67,8 +67,6 @@ type IoStatusBlock struct {
 }
 
 // FileDirectoryInformation mirrors the NT structure.
-// Note: FileName is declared as a one-element array so that we can treat it
-// as a flexible array member.
 type FileDirectoryInformation struct {
 	NextEntryOffset uint32
 	FileIndex       uint32
@@ -80,7 +78,7 @@ type FileDirectoryInformation struct {
 	AllocationSize  int64
 	FileAttributes  uint32
 	FileNameLength  uint32
-	FileName        [1]uint16
+	FileName        uint16
 }
 
 var (

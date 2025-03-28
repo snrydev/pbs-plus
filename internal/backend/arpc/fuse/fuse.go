@@ -156,6 +156,7 @@ var _ = (fs.NodeStatfser)((*Node)(nil))
 var _ = (fs.NodeAccesser)((*Node)(nil))
 var _ = (fs.NodeReleaser)((*Node)(nil))
 var _ = (fs.NodeStatxer)((*Node)(nil))
+var _ = (fs.NodeReaddirer)((*Node)(nil))
 var _ = (fs.NodeOpendirHandler)((*Node)(nil))
 
 func (n *Node) Access(ctx context.Context, mask uint32) syscall.Errno {
@@ -388,6 +389,21 @@ func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 		fs:   n.fs,
 		file: &file,
 	}, 0, 0
+}
+
+func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	// Open the directory
+	handle, err := n.fs.OpenDir(n.getPath(), 0)
+	if err != nil {
+		return nil, fs.ToErrno(err)
+	}
+
+	return &dirStream{
+		fs:      n.fs,
+		handle:  handle,
+		closed:  false,
+		hasNext: false,
+	}, 0
 }
 
 func (n *Node) OpendirHandle(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
