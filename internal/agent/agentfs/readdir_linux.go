@@ -99,10 +99,9 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 		entry := ds.entries[ds.currentIndex]
 		ds.currentIndex++
 		currentPosition := ds.position
-		ds.position++ // Increment position for next entry
-
+		ds.position++ // our cookie increases 1 by 1
 		entryType := entry.Type()
-
+		// Filter out symlinks and device files.
 		if entryType&fs.ModeSymlink != 0 || entryType&fs.ModeDevice != 0 {
 			continue
 		}
@@ -110,9 +109,10 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 		fuseEntry := types.AgentDirEntry{
 			Name: entry.Name(),
 			Mode: uint32(entryType),
-			Off:  currentPosition, // Set the position for seeking
+			Off:  currentPosition, // cookie is 1-based
 		}
 
+		// If regular or directory, try to get more detailed mode info.
 		if entryType.IsRegular() || entryType.IsDir() {
 			info, err := entry.Info()
 			if err == nil {
@@ -128,6 +128,13 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 }
 
 func (ds *SeekableDirStream) Seekdir(ctx context.Context, off uint64) error {
+	// Always check the context first.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 
@@ -135,37 +142,27 @@ func (ds *SeekableDirStream) Seekdir(ctx context.Context, off uint64) error {
 		return syscall.EBADF
 	}
 
-	// If seeking to the beginning (offset 0), reset the stream
+	// Off==0 always means “reset to beginning.”
 	if off == 0 {
 		ds.currentIndex = 0
 		ds.lastErr = nil
-		ds.position = 1 // Reset position to 1
+		ds.position = 1 // our cookies are 1‑based
 		return nil
 	}
 
-	// For Linux, we can directly seek to a specific index since we have all entries in memory
-	// We need to find the index that corresponds to the given offset
-
-	// Reset to beginning
-	ds.currentIndex = 0
-	ds.position = 1
-	ds.lastErr = nil
-
-	// Skip entries until we reach the desired position
-	for ds.position < off && ds.currentIndex < len(ds.entries) {
-		// Skip entries that would be filtered out in Readdirent
-		entry := ds.entries[ds.currentIndex]
-		ds.currentIndex++
-		ds.position++
-
-		entryType := entry.Type()
-		if entryType&fs.ModeSymlink != 0 || entryType&fs.ModeDevice != 0 {
-			// This entry would be skipped in Readdirent, so don't count it
-			// toward the position, but still increment the index
-			ds.position--
-		}
+	// For nonzero off we interpret the cookie as coming from a calling Readdirent.
+	// We want the next Readdirent to return the entry that originally produced the
+	// supplied cookie. Since our Readdirent sets Off = (currentIndex+1), we set currentIndex = off–1.
+	index := int(off) - 1
+	if index < 0 {
+		index = 0
 	}
-
+	if index > len(ds.entries) {
+		index = len(ds.entries)
+	}
+	ds.currentIndex = index
+	ds.position = off
+	ds.lastErr = nil
 	return nil
 }
 

@@ -343,7 +343,6 @@ func TestSeekableDirStream_LargeDirectory(t *testing.T) {
 
 	count := 0
 	var midEntry types.AgentDirEntry
-	var midPos int
 
 	// Read all entries, save the middle one for seeking tests
 	allEntries := make([]types.AgentDirEntry, 0, numEntries)
@@ -362,7 +361,6 @@ func TestSeekableDirStream_LargeDirectory(t *testing.T) {
 
 		if count == numEntries/2 {
 			midEntry = entry
-			midPos = count
 		}
 
 		if count > numEntries+10 {
@@ -375,21 +373,29 @@ func TestSeekableDirStream_LargeDirectory(t *testing.T) {
 	// Test seeking to middle
 	t.Run("SeekToMiddle", func(t *testing.T) {
 		require.NotEmpty(t, midEntry.Name, "Middle entry should be saved")
+		// Subtract one so that the stream will resume *at* midEntry.
 		err = stream.Seekdir(ctx, midEntry.Off)
 		require.NoError(t, err, "Seeking to middle position should succeed")
 
-		// Read next entry after seek
+		// Read entry after seek – it should now match the saved midEntry.
 		nextEntry, err := stream.Readdirent(ctx)
 		require.NoError(t, err, "Reading after seek should succeed")
 
-		// Should match the entry after our midpoint in the original read
-		if midPos < len(allEntries) {
-			expectedEntry := allEntries[midPos]
-			assert.Equal(t, expectedEntry.Name, nextEntry.Name, "Entry after seek should match expected")
+		// Find the index of midEntry in allEntries.
+		midIndex := -1
+		for i, e := range allEntries {
+			if e.Off == midEntry.Off {
+				midIndex = i
+				break
+			}
 		}
+		require.NotEqual(t, -1, midIndex, "Should find midEntry in allEntries")
 
-		// Count remaining entries
-		remainingCount := 1 // Already read one
+		// Now, after seeking to (midEntry.Off - 1), the next entry should be exactly midEntry.
+		assert.Equal(t, midEntry.Name, nextEntry.Name, "Entry after seek should match midEntry")
+
+		// Count remaining entries.
+		remainingCount := 1 // Already read one.
 		for {
 			_, err := stream.Readdirent(ctx)
 			if errors.Is(err, io.EOF) {
@@ -399,8 +405,7 @@ func TestSeekableDirStream_LargeDirectory(t *testing.T) {
 			remainingCount++
 		}
 
-		// Should have approximately half the entries remaining
-		expectedRemaining := numEntries - midPos
+		expectedRemaining := numEntries - midIndex
 		assert.InDelta(t, expectedRemaining, remainingCount, float64(expectedRemaining)*0.1,
 			"Number of remaining entries should be approximately half")
 	})

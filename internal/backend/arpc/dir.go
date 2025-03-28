@@ -87,6 +87,7 @@ func (fs *ARPCFS) Readdirent(fh types.HandleId) (fuse.DirEntry, error) {
 	return fuse.DirEntry{
 		Name: resp.Name,
 		Mode: modeBits,
+		Off:  resp.Off,
 	}, nil
 }
 
