@@ -201,14 +201,23 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 	)
 
 	if status != STATUS_SUCCESS {
-		// Map common errors, otherwise return a generic one
 		errno := syscall.Errno(status)
 		switch errno {
+		case 0xC0000034, // STATUS_OBJECT_NAME_NOT_FOUND
+			0xC000003A: // STATUS_OBJECT_PATH_NOT_FOUND
+			// Map these explicitly to os.ErrNotExist, potentially overriding syscall mapping if needed
+			return nil, &os.PathError{Op: "NtCreateFile", Path: path, Err: os.ErrNotExist}
+
+		// Keep existing cases like ERROR_FILE_NOT_FOUND if they map differently but correctly
 		case syscall.ERROR_FILE_NOT_FOUND, syscall.ERROR_PATH_NOT_FOUND:
 			return nil, &os.PathError{Op: "NtCreateFile", Path: path, Err: os.ErrNotExist}
 		case syscall.ERROR_ACCESS_DENIED:
 			return nil, &os.PathError{Op: "NtCreateFile", Path: path, Err: os.ErrPermission}
+		// Add case for STATUS_NOT_A_DIRECTORY if needed, map to syscall.ENOTDIR
+		case 0xC00000E3: // STATUS_NOT_A_DIRECTORY
+			return nil, &os.PathError{Op: "NtCreateFile", Path: path, Err: syscall.ENOTDIR} // Or appropriate error
 		default:
+			// Ensure the default returns the wrapped error
 			return nil, &os.PathError{Op: "NtCreateFile", Path: path, Err: errno}
 		}
 	}
@@ -237,6 +246,15 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 func (ds *SeekableDirStream) fillBuffer(restart bool) error {
 	if ds.eof {
 		return nil
+	}
+
+	if ds.buffer == nil {
+		// This indicates a programming error (called after Close)
+		return syscall.EBADF // Or EFAULT
+	}
+
+	if ds.handle == 0 || ds.handle == uintptr(syscall.InvalidHandle) {
+		return syscall.EBADF
 	}
 
 	ds.currentOffset = 0
@@ -450,6 +468,11 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 
 	// If hasNext is false, check the reason
 	ds.mu.Lock()
+	if ds.handle == 0 || ds.handle == uintptr(syscall.InvalidHandle) {
+		ds.mu.Unlock()
+		return types.AgentDirEntry{}, syscall.EBADF
+	}
+
 	lastErr := ds.lastStatus
 	isEof := ds.eof
 	ds.mu.Unlock()
@@ -468,7 +491,11 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 
 func (ds *SeekableDirStream) Seekdir(ctx context.Context, off uint64) error {
 	ds.mu.Lock()
-	defer ds.mu.Unlock()
+	if ds.handle == 0 || ds.handle == uintptr(syscall.InvalidHandle) {
+		ds.mu.Unlock()
+		return syscall.EBADF
+	}
+	defer ds.mu.Unlock() // Keep defer if checks pass
 
 	if off == 0 {
 		// Reset state and refill buffer from the beginning
