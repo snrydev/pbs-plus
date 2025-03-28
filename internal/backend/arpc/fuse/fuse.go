@@ -391,19 +391,14 @@ func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 	}, 0, 0
 }
 
+// Node's Readdir implementation
 func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	// Open the directory
-	handle, err := n.fs.OpenDir(n.getPath(), 0)
+	stream, err := n.fs.OpenDirStream(n.getPath())
 	if err != nil {
 		return nil, fs.ToErrno(err)
 	}
 
-	return &dirStream{
-		fs:      n.fs,
-		handle:  handle,
-		closed:  false,
-		hasNext: false,
-	}, 0
+	return &dirStream{stream: stream}, 0
 }
 
 func (n *Node) OpendirHandle(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
