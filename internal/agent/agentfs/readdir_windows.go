@@ -27,9 +27,23 @@ const (
 	FILE_DIRECTORY_FILE          = 0x00000001
 	FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
 	OBJ_CASE_INSENSITIVE         = 0x00000040
+)
+
+// NTSTATUS Constants
+const (
 	STATUS_SUCCESS               = 0x00000000
-	STATUS_NO_SUCH_FILE          = 0xC000000F // Used for seeking errors potentially
 	STATUS_NO_MORE_FILES         = 0x80000006
+	STATUS_NO_SUCH_FILE          = 0xC000000F // Can occur during query?
+	STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034
+	STATUS_OBJECT_PATH_NOT_FOUND = 0xC000003A
+	STATUS_ACCESS_DENIED         = 0xC0000022
+	STATUS_NOT_A_DIRECTORY       = 0xC00000E3
+	STATUS_INVALID_INFO_CLASS    = 0xC0000103 // Often seen when treating file as dir
+)
+
+// IoStatusBlock.Information values for CreateDisposition=OPEN_EXISTING
+const (
+	FILE_OPENED = 1
 )
 
 type UnicodeString struct {
@@ -86,7 +100,7 @@ func convertToNTPath(path string) string {
 	return "\\??\\" + path
 }
 
-func boolToInt(b bool) uint32 {
+func boolToUintptr(b bool) uintptr {
 	if b {
 		return 1
 	}
@@ -146,213 +160,228 @@ var fileInfoPool = sync.Pool{
 	},
 }
 
-// SeekableDirStream implements DirStream, FileReaddirenter, FileSeekdirer,
-// and FileReleasedirer for Windows directories using NT APIs.
 type SeekableDirStream struct {
 	mu            sync.Mutex
-	handle        uintptr       // Directory handle from NtCreateFile
-	buffer        []byte        // Buffer to hold directory entries from NtQueryDirectoryFile
-	poolBuf       bool          // Indicates if the buffer came from the pool
-	currentOffset int           // Current read offset within the buffer
-	bytesInBuf    uintptr       // Number of valid bytes currently in the buffer
-	eof           bool          // True if NtQueryDirectoryFile returned STATUS_NO_MORE_FILES
-	lastStatus    syscall.Errno // Stores the last error encountered during next/fillBuffer
+	handle        syscall.Handle // Use syscall.Handle for clarity
+	path          string         // Store original path for error messages
+	buffer        []byte         // Buffer for NtQueryDirectoryFile results
+	poolBuf       bool           // Indicates if the buffer came from the pool
+	currentOffset int            // Read offset within the current buffer
+	bytesInBuf    uintptr        // Valid bytes in the buffer
+	eof           bool           // True if NtQueryDirectoryFile returned STATUS_NO_MORE_FILES
+	lastNtStatus  uintptr        // Last NTSTATUS from NtQueryDirectoryFile
 }
 
-type FolderHandle struct {
-	uint64
-}
-
+// OpendirHandle opens a directory using NtCreateFile.
 func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStream, error) {
 	ntPath := convertToNTPath(path)
-	syslog.L.Info().WithMessage(fmt.Sprintf("[DEBUG OpendirHandle] Input path: %s, NT Path: %s\n", path, ntPath)).Write()
+	syslog.L.Info().WithMessage(fmt.Sprintf("[DEBUG OpendirHandle] Input path: %s, NT Path: %s", path, ntPath)).Write()
 
 	pathUTF16, err := syscall.UTF16PtrFromString(ntPath)
 	if err != nil {
-		syslog.L.Error(fmt.Errorf("UTF16PtrFromString error: %v\n", err)).Write()
-		return nil, err
+		return nil, &os.PathError{Op: "UTF16PtrFromString", Path: path, Err: err}
 	}
 
 	var unicodeString UnicodeString
-	rtlInitUnicodeString.Call(
-		uintptr(unsafe.Pointer(&unicodeString)),
-		uintptr(unsafe.Pointer(pathUTF16)),
-	)
+	// RtlInitUnicodeString is safe to call directly
+	rtlInitUnicodeString.Call(uintptr(unsafe.Pointer(&unicodeString)), uintptr(unsafe.Pointer(pathUTF16)))
 
 	var objectAttributes ObjectAttributes
 	objectAttributes.Length = uint32(unsafe.Sizeof(objectAttributes))
 	objectAttributes.ObjectName = &unicodeString
-	objectAttributes.Attributes = OBJ_CASE_INSENSITIVE
+	objectAttributes.Attributes = OBJ_CASE_INSENSITIVE // Case-insensitive lookup
 
-	var handle uintptr
+	var handle syscall.Handle
 	var ioStatusBlock IoStatusBlock
 
+	// DesiredAccess: List directory contents and synchronize (needed for synchronous I/O)
 	desiredAccess := uintptr(FILE_LIST_DIRECTORY | syscall.SYNCHRONIZE)
+	// ShareAccess: Allow others to read, write, or delete while open
 	shareAccess := uintptr(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+	// CreateOptions:
+	// - FILE_DIRECTORY_FILE: Ensure we are opening a directory.
+	// - FILE_SYNCHRONOUS_IO_NONALERT: Perform synchronous I/O.
 	createOptions := uintptr(FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT)
+	// CreateDisposition: Fail if the directory doesn't exist.
+	createDisposition := uintptr(OPEN_EXISTING)
 
-	status, _, errnoSyscall := ntCreateFile.Call(
-		uintptr(unsafe.Pointer(&handle)),
-		desiredAccess,
-		uintptr(unsafe.Pointer(&objectAttributes)),
-		uintptr(unsafe.Pointer(&ioStatusBlock)),
-		0, // AllocationSize
-		0, // FileAttributes
-		shareAccess,
-		OPEN_EXISTING,
-		createOptions,
-		0, // EaBuffer
-		0, // EaLength
+	// Call NtCreateFile
+	// The first return value (r1) is the NTSTATUS code (uintptr).
+	// The third return value (err) is from GetLastError, unreliable for NT APIs.
+	ntStatus, _, _ := ntCreateFile.Call(
+		uintptr(unsafe.Pointer(&handle)),           // Pointer to receive handle
+		desiredAccess,                              // Access mask
+		uintptr(unsafe.Pointer(&objectAttributes)), // Object attributes (path)
+		uintptr(unsafe.Pointer(&ioStatusBlock)),    // Pointer to I/O status block
+		0,                                          // AllocationSize (not used for opening existing)
+		0,                                          // FileAttributes (not used for opening existing)
+		shareAccess,                                // Share access
+		createDisposition,                          // Create disposition (OPEN_EXISTING)
+		createOptions,                              // Create options (directory, synchronous)
+		0,                                          // EaBuffer (optional)
+		0,                                          // EaLength (optional)
 	)
 
-	syslog.L.Info().WithMessage(fmt.Sprintf("[DEBUG OpendirHandle] NtCreateFile result - path: %s, status: 0x%X, handle: 0x%X, ioStatusBlock.Status: 0x%X, syscallErr: %v\n",
-		path, status, handle, ioStatusBlock.Status, errnoSyscall)).Write()
+	syslog.L.Info().WithMessage(fmt.Sprintf(
+		"[DEBUG OpendirHandle] NtCreateFile result - path: %s, ntStatus: 0x%X, handle: 0x%X, ioStatusBlock.Status: 0x%X, ioStatusBlock.Information: 0x%X",
+		path, ntStatus, handle, ioStatusBlock.Status, ioStatusBlock.Information,
+	)).Write()
 
-	// Windows NT API can have status=0 but still have error in IoStatusBlock
-	if status != STATUS_SUCCESS || ioStatusBlock.Status != 0 {
-		syslog.L.Info().WithMessage(fmt.Sprintf("[DEBUG OpendirHandle] NtCreateFile FAILED - path: %s, status: 0x%X, ioStatusBlock.Status: 0x%X\n",
-			path, status, ioStatusBlock.Status)).Write()
-
-		// Use the most specific status for error
-		effectiveStatus := status
-		if ioStatusBlock.Status != 0 {
-			effectiveStatus = uintptr(ioStatusBlock.Status)
+	// --- Primary Status Check ---
+	if ntStatus != STATUS_SUCCESS {
+		syslog.L.Info().WithMessage(fmt.Sprintf("[DEBUG OpendirHandle] NtCreateFile FAILED - path: %s, ntStatus: 0x%X", path, ntStatus)).Write()
+		// Map common NTSTATUS codes to Go errors
+		var goErr error
+		switch ntStatus {
+		case STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND:
+			goErr = os.ErrNotExist
+		case STATUS_ACCESS_DENIED:
+			goErr = os.ErrPermission
+		case STATUS_NOT_A_DIRECTORY, STATUS_INVALID_INFO_CLASS: // Treat file-as-dir error as ENOTDIR
+			goErr = syscall.ENOTDIR
+		default:
+			// Return a generic error including the NTSTATUS code
+			goErr = fmt.Errorf("NTSTATUS 0x%X", ntStatus)
 		}
-
-		ntStatusErr := fmt.Errorf("NTSTATUS 0x%X", effectiveStatus)
-		switch effectiveStatus {
-		case 0xC0000034, // STATUS_OBJECT_NAME_NOT_FOUND
-			0xC000003A: // STATUS_OBJECT_PATH_NOT_FOUND
-			ntStatusErr = os.ErrNotExist
-		case 0xC0000022: // STATUS_ACCESS_DENIED
-			ntStatusErr = os.ErrPermission
-		case 0xC00000E3, // STATUS_NOT_A_DIRECTORY
-			0xC0000103: // STATUS_FILE_IS_A_DIRECTORY (used when opening a file as dir)
-			ntStatusErr = syscall.ENOTDIR
-		}
-		return nil, &os.PathError{Op: "NtCreateFile", Path: path, Err: ntStatusErr}
+		return nil, &os.PathError{Op: "NtCreateFile", Path: path, Err: goErr}
 	}
 
-	if handle == 0 || handle == uintptr(syscall.InvalidHandle) {
-		syslog.L.Error(fmt.Errorf("NtCreateFile reported success (0x%X) but handle is invalid (0x%X) - path: %s\n", status, handle, path)).Write()
-		return nil, &os.PathError{Op: "NtCreateFile", Path: path, Err: fmt.Errorf("reported success but got invalid handle")}
+	// --- Secondary Checks for Success Case ---
+
+	// FIX: Check IoStatusBlock.Information for OPEN_EXISTING success.
+	// If NtCreateFile returns SUCCESS but Information is not FILE_OPENED,
+	// it might indicate the non-existent path anomaly.
+	if ioStatusBlock.Information != FILE_OPENED {
+		syslog.L.Warn().WithMessage(fmt.Sprintf(
+			"[DEBUG OpendirHandle] NtCreateFile SUCCESS but IoStatusBlock.Information != FILE_OPENED (is 0x%X) - path: %s. Treating as Not Exist.",
+			ioStatusBlock.Information, path,
+		)).Write()
+		// Close the potentially problematic handle before returning error
+		if handle != syscall.InvalidHandle {
+			ntClose.Call(uintptr(handle))
+		}
+		return nil, &os.PathError{Op: "NtCreateFile", Path: path, Err: os.ErrNotExist}
 	}
 
-	// If status is SUCCESS and handle is valid, proceed...
-	syslog.L.Info().WithMessage(fmt.Sprintf("[DEBUG OpendirHandle] NtCreateFile SUCCESS - path: %s, handle: 0x%X\n", path, handle)).Write()
+	// Check if the handle is valid
+	if handle == syscall.InvalidHandle {
+		syslog.L.Error(fmt.Errorf("NtCreateFile reported success (0x%X) but handle is invalid - path: %s", ntStatus, path)).Write()
+		// No need to close InvalidHandle
+		return nil, &os.PathError{Op: "NtCreateFile", Path: path, Err: errors.New("reported success but got invalid handle")}
+	}
+
+	// --- Success: Prepare Stream ---
+	syslog.L.Info().WithMessage(fmt.Sprintf("[DEBUG OpendirHandle] NtCreateFile SUCCESS - path: %s, handle: 0x%X", path, handle)).Write()
 
 	bufInterface := fileInfoPool.Get()
 	buffer, ok := bufInterface.([]byte)
-	if !ok {
-		// Clean up the handle if buffer allocation fails
-		ntClose.Call(handle)
-		syslog.L.Error(fmt.Errorf("Invalid buffer type from pool"))
-		return nil, fmt.Errorf("invalid buffer type from pool")
+	if !ok || buffer == nil || len(buffer) == 0 {
+		ntClose.Call(uintptr(handle)) // Clean up handle
+		syslog.L.Error(fmt.Errorf("invalid buffer type or size from pool")).Write()
+		if ok && buffer != nil { // Return invalid buffer if possible
+			fileInfoPool.Put(buffer)
+		}
+		return nil, fmt.Errorf("failed to get valid buffer from pool")
 	}
 
 	stream := &SeekableDirStream{
 		handle:        handle,
+		path:          path, // Store path for context
 		buffer:        buffer,
 		poolBuf:       true,
 		currentOffset: 0,
 		bytesInBuf:    0,
 		eof:           false,
-		lastStatus:    0, // Initialize lastStatus to 0 (no error)
+		lastNtStatus:  STATUS_SUCCESS, // Initialize status
 	}
 
 	return stream, nil
 }
 
-// Ensure fillBuffer uses the direct uintptr return for status checking
+// fillBuffer calls NtQueryDirectoryFile to populate the internal buffer.
+// It returns an error (including io.EOF) or nil.
+// Assumes the caller holds the mutex.
 func (ds *SeekableDirStream) fillBuffer(restart bool) error {
-	// Remove ds.mu.Lock() and ds.mu.Unlock() from here if callers always hold the lock
-
 	if ds.eof {
-		return nil // Already reached end
+		return io.EOF // Already reached end
 	}
 
 	// Check handle validity *before* calling NtQueryDirectoryFile
-	if ds.handle == 0 || ds.handle == uintptr(syscall.InvalidHandle) {
-		ds.eof = true // Mark as EOF if handle is bad
-		ds.lastStatus = syscall.EBADF
+	if ds.handle == syscall.InvalidHandle {
+		ds.eof = true
+		ds.lastNtStatus = uintptr(syscall.EBADF) // Use EBADF for status
 		return syscall.EBADF
 	}
 	// Check buffer validity
-	if ds.buffer == nil {
+	if ds.buffer == nil || len(ds.buffer) == 0 {
 		ds.eof = true
-		ds.lastStatus = syscall.EFAULT // Or EBADF, indicates internal error
-		return ds.lastStatus
-	}
-	if len(ds.buffer) == 0 {
-		ds.eof = true
-		ds.lastStatus = syscall.EFAULT // Buffer is unusable
-		return ds.lastStatus
+		ds.lastNtStatus = uintptr(syscall.EFAULT) // Indicate internal buffer error
+		return syscall.EFAULT
 	}
 
 	ds.currentOffset = 0
 	ds.bytesInBuf = 0
 
-	// We still need ioStatusBlock for the Information field (bytes read)
 	var ioStatusBlock IoStatusBlock
 
-	// Make the call - capture the direct status return (r1 uintptr)
-	// The third return value (syscall.Errno) is less reliable here than r1.
-	status_r1, _, _ := ntQueryDirectoryFile.Call(
-		ds.handle,
-		0,                                       // Event
-		0,                                       // ApcRoutine
-		0,                                       // ApcContext
-		uintptr(unsafe.Pointer(&ioStatusBlock)), // Still needed for Information
-		uintptr(unsafe.Pointer(&ds.buffer[0])),  // Access buffer[0] safely now
-		uintptr(len(ds.buffer)),
-		uintptr(1), // FileDirectoryInformation class
-		uintptr(0), // ReturnSingleEntry = FALSE
-		0,          // FileName = NULL
-		uintptr(boolToInt(restart)),
+	// Call NtQueryDirectoryFile
+	// r1 is the NTSTATUS code (uintptr)
+	ntStatus, _, _ := ntQueryDirectoryFile.Call(
+		uintptr(ds.handle),                      // Directory handle
+		0,                                       // Event (optional)
+		0,                                       // ApcRoutine (optional)
+		0,                                       // ApcContext (optional)
+		uintptr(unsafe.Pointer(&ioStatusBlock)), // I/O status block
+		uintptr(unsafe.Pointer(&ds.buffer[0])),  // Buffer
+		uintptr(len(ds.buffer)),                 // Buffer length
+		uintptr(1),                              // FileInformationClass = FileDirectoryInformation
+		uintptr(0),                              // ReturnSingleEntry = FALSE
+		0,                                       // FileName (optional filter, NULL here)
+		boolToUintptr(restart),                  // RestartScan
 	)
 
-	// --- Use status_r1 (uintptr) for reliable status checking ---
+	ds.lastNtStatus = ntStatus // Store the status regardless
 
-	// Cast uintptr to uint32 for direct comparison with NTSTATUS constants
-	statusValue := uint32(status_r1)
+	// --- Check NTSTATUS ---
+	switch ntStatus {
+	case STATUS_SUCCESS:
+		ds.bytesInBuf = ioStatusBlock.Information
+		if ds.bytesInBuf == 0 {
+			// Success but no bytes read means end of directory
+			ds.eof = true
+			return io.EOF
+		}
+		ds.eof = false // We got data
+		return nil     // Success
 
-	// Check for STATUS_NO_MORE_FILES using the reliable statusValue
-	if statusValue == STATUS_NO_MORE_FILES {
+	case STATUS_NO_MORE_FILES:
 		ds.eof = true
 		ds.bytesInBuf = 0
-		ds.lastStatus = 0 // Not an error
-		return nil        // Correctly signifies end of directory
-	}
+		return io.EOF // End of directory reached
 
-	// Check for any other non-success status
-	if statusValue != STATUS_SUCCESS { // STATUS_SUCCESS is 0
+	default:
+		// Any other status is an error
 		ds.eof = true // Assume EOF on error
 		ds.bytesInBuf = 0
-		// Store the error code. ds.lastStatus is syscall.Errno (uintptr), so direct assignment is okay.
-		ds.lastStatus = syscall.Errno(status_r1)
-		fmt.Printf("[DEBUG fillBuffer] NtQueryDirectoryFile FAIL - statusValue: 0x%X, mapped errno: %v\n", statusValue, ds.lastStatus)
-		return ds.lastStatus
+		syslog.L.Error(fmt.Errorf("[DEBUG fillBuffer] NtQueryDirectoryFile FAIL - path: %s, ntStatus: 0x%X", ds.path, ntStatus)).Write()
+
+		// Map to a Go error if possible, otherwise return a generic one
+		switch ntStatus {
+		case STATUS_NO_SUCH_FILE: // Can happen if dir deleted between calls?
+			return os.ErrNotExist
+		case STATUS_ACCESS_DENIED:
+			return os.ErrPermission
+		default:
+			// Use syscall.Errno for generic OS errors, mapping NTSTATUS might lose info
+			// Consider returning a custom error type wrapping the NTSTATUS
+			return fmt.Errorf("NtQueryDirectoryFile failed: NTSTATUS 0x%X", ntStatus)
+		}
 	}
-
-	// --- If we reach here, statusValue was STATUS_SUCCESS ---
-
-	// Get the number of bytes read from the IoStatusBlock
-	ds.bytesInBuf = ioStatusBlock.Information
-	ds.lastStatus = 0 // Reset last error
-	ds.eof = false    // We got data
-
-	// If status was SUCCESS but no bytes were returned, it implies end of directory.
-	// This can happen if the directory becomes empty between calls, or if the buffer
-	// was too small for even one entry (though we use a large buffer).
-	if ds.bytesInBuf == 0 {
-		ds.eof = true
-		return nil // Treat as EOF condition
-	}
-
-	return nil
 }
 
+// Readdirent reads the next directory entry.
 func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntry, error) {
+	// Check context cancellation first
 	select {
 	case <-ctx.Done():
 		return types.AgentDirEntry{}, ctx.Err()
@@ -360,175 +389,186 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 	}
 
 	ds.mu.Lock()
-	// Check handle FIRST
-	if ds.handle == 0 || ds.handle == uintptr(syscall.InvalidHandle) {
-		ds.mu.Unlock()
+	defer ds.mu.Unlock()
+
+	// Check handle validity
+	if ds.handle == syscall.InvalidHandle {
 		return types.AgentDirEntry{}, syscall.EBADF
 	}
 
-	// Check if buffer needs refilling or if we hit EOF/error
-	if ds.currentOffset >= int(ds.bytesInBuf) {
-		// If we are at the end of the buffer, check lastStatus and eof
-		if ds.lastStatus != 0 {
-			err := ds.lastStatus
-			// ds.lastStatus = 0 // Don't consume error here, let hasNext/next handle it? No, Readdirent should return it.
-			ds.mu.Unlock()
-			return types.AgentDirEntry{}, err
-		}
-		if ds.eof {
-			ds.mu.Unlock()
-			return types.AgentDirEntry{}, io.EOF
-		}
-
-		// If buffer is empty but no EOF and no prior error, try filling
-		fillErr := ds.fillBuffer(false) // fillBuffer now returns error
-		if fillErr != nil {
-			// fillBuffer already set ds.lastStatus and potentially ds.eof
-			ds.mu.Unlock()
-			// If fillErr was EOF, return EOF. Otherwise return the error.
-			if errors.Is(fillErr, io.EOF) || (ds.eof && ds.lastStatus == 0) { // Check ds.eof too
-				return types.AgentDirEntry{}, io.EOF
-			}
-			return types.AgentDirEntry{}, fillErr // Return the actual error from fillBuffer
-		}
-
-		// After filling, check again if we have data
+	for { // Loop to handle buffer refills and skipping entries
+		// Check if buffer needs refilling or if we previously hit EOF/error
 		if ds.currentOffset >= int(ds.bytesInBuf) {
-			// If fillBuffer succeeded but we still have no data, it must be EOF
 			if ds.eof {
-				ds.mu.Unlock()
 				return types.AgentDirEntry{}, io.EOF
 			}
-			// Should not happen if fillBuffer logic is correct
-			ds.lastStatus = syscall.EIO // Unexpected state
-			ds.mu.Unlock()
-			return types.AgentDirEntry{}, syscall.EIO
+			// If last operation had an error status (other than SUCCESS/NO_MORE_FILES)
+			if ds.lastNtStatus != STATUS_SUCCESS && ds.lastNtStatus != STATUS_NO_MORE_FILES {
+				// Return the error derived from the last status
+				// This assumes fillBuffer already mapped it appropriately
+				return types.AgentDirEntry{}, fmt.Errorf("previous NtQueryDirectoryFile failed: NTSTATUS 0x%X", ds.lastNtStatus)
+			}
+
+			// Try to fill the buffer
+			fillErr := ds.fillBuffer(false) // restart = false
+			if fillErr != nil {
+				// fillBuffer returns io.EOF or another error
+				return types.AgentDirEntry{}, fillErr
+			}
+			// If fillBuffer succeeded but returned no data (should be caught by fillErr == io.EOF)
+			if ds.bytesInBuf == 0 || ds.currentOffset >= int(ds.bytesInBuf) {
+				ds.eof = true // Mark EOF just in case
+				return types.AgentDirEntry{}, io.EOF
+			}
 		}
-	}
 
-	// --- If we have data in the buffer, proceed to parse (logic from next()) ---
+		// --- Parse entry from buffer ---
+		entryPtr := unsafe.Pointer(&ds.buffer[ds.currentOffset])
+		entry := (*FileDirectoryInformation)(entryPtr)
 
-	entryPtr := unsafe.Pointer(&ds.buffer[ds.currentOffset])
-	entry := (*FileDirectoryInformation)(entryPtr)
-
-	// Basic sanity check
-	if ds.currentOffset+int(unsafe.Offsetof(entry.FileName)) > int(ds.bytesInBuf) {
-		ds.lastStatus = syscall.EIO
-		ds.mu.Unlock()
-		return types.AgentDirEntry{}, syscall.EIO // Buffer underflow/corruption
-	}
-
-	// Validate FileNameLength before using it
-	fileNameBytes := entry.FileNameLength
-	if fileNameBytes > uint32(len(ds.buffer)) || (ds.currentOffset+int(unsafe.Offsetof(entry.FileName))+int(fileNameBytes)) > int(ds.bytesInBuf) {
-		ds.lastStatus = syscall.EIO
-		ds.mu.Unlock()
-		return types.AgentDirEntry{}, syscall.EIO // Invalid data or exceeds buffer
-	}
-
-	// Extract filename
-	fileNameLenInChars := fileNameBytes / 2 // UTF-16 characters
-	fileName := ""
-	if fileNameLenInChars > 0 {
-		fileNamePtr := unsafe.Pointer(uintptr(entryPtr) + unsafe.Offsetof(entry.FileName))
-		fileNameSlice := unsafe.Slice((*uint16)(fileNamePtr), fileNameLenInChars)
-		fileName = string(utf16.Decode(fileNameSlice))
-	} else if fileNameBytes == 0 && entry.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
-		// Allow zero length for non-directories? Unlikely. Treat as error or skip?
-		// Let's treat as error for now.
-		ds.lastStatus = syscall.EIO
-		ds.mu.Unlock()
-		return types.AgentDirEntry{}, syscall.EIO // Zero length filename
-	}
-
-	// Calculate next entry offset and advance currentOffset
-	nextOffsetDelta := int(entry.NextEntryOffset)
-	nextAbsOffset := ds.currentOffset // Default if NextEntryOffset is 0
-
-	if nextOffsetDelta < 0 {
-		ds.lastStatus = syscall.EIO
-		ds.mu.Unlock()
-		return types.AgentDirEntry{}, syscall.EIO // Invalid offset
-	} else if nextOffsetDelta > 0 {
-		nextAbsOffset = ds.currentOffset + nextOffsetDelta
-		// Check if the next offset is valid within the buffer
-		if nextAbsOffset <= ds.currentOffset || nextAbsOffset > int(ds.bytesInBuf) {
-			ds.lastStatus = syscall.EIO
-			ds.mu.Unlock()
-			return types.AgentDirEntry{}, syscall.EIO // Invalid next position
+		// --- Sanity Checks ---
+		// Check if basic struct fits
+		if ds.currentOffset+int(unsafe.Offsetof(entry.FileName)) > int(ds.bytesInBuf) {
+			ds.lastNtStatus = uintptr(syscall.EIO)    // Indicate corruption
+			ds.eof = true                             // Stop further reads
+			return types.AgentDirEntry{}, syscall.EIO // Buffer underflow/corruption
 		}
-	} else {
-		// NextEntryOffset is 0, this is the last entry in the buffer
-		nextAbsOffset = int(ds.bytesInBuf)
+		// Check if FileNameLength is plausible
+		fileNameBytes := entry.FileNameLength
+		structBaseSize := int(unsafe.Offsetof(entry.FileName))
+		if fileNameBytes > uint32(len(ds.buffer)) || (ds.currentOffset+structBaseSize+int(fileNameBytes)) > int(ds.bytesInBuf) {
+			ds.lastNtStatus = uintptr(syscall.EIO)    // Indicate corruption
+			ds.eof = true                             // Stop further reads
+			return types.AgentDirEntry{}, syscall.EIO // Invalid data or exceeds buffer
+		}
+
+		// --- Extract Filename ---
+		fileNameLenInChars := fileNameBytes / 2 // UTF-16 characters (WCHAR)
+		fileName := ""
+		if fileNameLenInChars > 0 {
+			// Calculate pointer to the start of the filename
+			fileNamePtr := unsafe.Pointer(uintptr(entryPtr) + unsafe.Offsetof(entry.FileName))
+			// Create a slice of uint16 covering the filename
+			fileNameSlice := unsafe.Slice((*uint16)(fileNamePtr), fileNameLenInChars)
+			fileName = string(utf16.Decode(fileNameSlice))
+		} else {
+			// Zero-length filename? This shouldn't happen for valid entries. Skip it.
+			// Log this? syslog.L.Warn()...("Zero-length filename encountered")
+			goto nextEntry // Use goto for clarity in skipping logic
+		}
+
+		// --- Skip "." and ".." ---
+		if fileName == "." || fileName == ".." {
+			goto nextEntry
+		}
+
+		// --- Skip entries with excluded attributes ---
+		// (e.g., reparse points, offline files, etc.)
+		if entry.FileAttributes&excludedAttrs != 0 {
+			goto nextEntry
+		}
+
+		// --- Prepare AgentDirEntry ---
+		{
+			mode := windowsAttributesToFileMode(entry.FileAttributes)
+			fuseEntry := types.AgentDirEntry{
+				Name: fileName,
+				Mode: uint32(mode), // Convert os.FileMode to uint32
+				// Ino, Size, etc. could be populated if needed from 'entry'
+			}
+
+			// --- Advance Offset for Next Read ---
+			nextOffsetDelta := int(entry.NextEntryOffset)
+			if nextOffsetDelta <= 0 {
+				// This is the last entry in the *current* buffer
+				ds.currentOffset = int(ds.bytesInBuf)
+			} else {
+				nextAbsOffset := ds.currentOffset + nextOffsetDelta
+				// Sanity check the next offset
+				if nextAbsOffset <= ds.currentOffset || nextAbsOffset > int(ds.bytesInBuf) {
+					ds.lastNtStatus = uintptr(syscall.EIO) // Corruption
+					ds.eof = true
+					return types.AgentDirEntry{}, syscall.EIO // Invalid next offset
+				}
+				ds.currentOffset = nextAbsOffset
+			}
+
+			// Successfully parsed and filtered, return the entry
+			return fuseEntry, nil
+		}
+
+	nextEntry:
+		// --- Advance Offset if Skipping ---
+		nextOffsetDelta := int(entry.NextEntryOffset)
+		if nextOffsetDelta <= 0 {
+			ds.currentOffset = int(ds.bytesInBuf)
+		} else {
+			nextAbsOffset := ds.currentOffset + nextOffsetDelta
+			if nextAbsOffset <= ds.currentOffset || nextAbsOffset > int(ds.bytesInBuf) {
+				ds.lastNtStatus = uintptr(syscall.EIO) // Corruption
+				ds.eof = true
+				return types.AgentDirEntry{}, syscall.EIO // Invalid next offset
+			}
+			ds.currentOffset = nextAbsOffset
+		}
+		// Loop back to process the next entry or refill buffer
 	}
-	ds.currentOffset = nextAbsOffset // Advance offset
-
-	// Skip "." and ".." entries
-	if fileName == "." || fileName == ".." {
-		ds.mu.Unlock()            // Unlock before recursive call
-		return ds.Readdirent(ctx) // Tail call optimization unlikely, potential stack depth issue?
-	}
-
-	// Skip entries with excluded attributes
-	if entry.FileAttributes&excludedAttrs != 0 {
-		ds.mu.Unlock() // Unlock before recursive call
-		return ds.Readdirent(ctx)
-	}
-
-	// Convert attributes to file mode
-	mode := windowsAttributesToFileMode(entry.FileAttributes)
-
-	fuseEntry := types.AgentDirEntry{
-		Name: fileName,
-		Mode: mode,
-	}
-
-	ds.lastStatus = 0 // Reset last error status on successful read *of this entry*
-	ds.mu.Unlock()
-	return fuseEntry, nil
 }
 
+// Seekdir resets the directory stream position. Only offset 0 is supported.
 func (ds *SeekableDirStream) Seekdir(ctx context.Context, off uint64) error {
+	// Context check isn't strictly necessary for Seek(0) as it's fast,
+	// but good practice. Seek(>0) fails immediately anyway.
+	select {
+	case <-ctx.Done():
+		return ctx.Err() // Return context error if already cancelled
+	default:
+	}
+
 	ds.mu.Lock()
-	// Check handle FIRST
-	if ds.handle == 0 || ds.handle == uintptr(syscall.InvalidHandle) {
-		ds.mu.Unlock()
+	defer ds.mu.Unlock()
+
+	// Check handle validity
+	if ds.handle == syscall.InvalidHandle {
 		return syscall.EBADF
 	}
 
 	if off == 0 {
-		// Reset state
+		// Reset internal state *before* calling fillBuffer
 		ds.currentOffset = 0
 		ds.bytesInBuf = 0
 		ds.eof = false
-		ds.lastStatus = 0
-		// Call fillBuffer which now returns error and checks handle/buffer
-		err := ds.fillBuffer(true) // restart scan
-		ds.mu.Unlock()
-		// If fillBuffer returned EOF, Seekdir(0) is successful.
+		ds.lastNtStatus = STATUS_SUCCESS // Reset status before query
+
+		// Call fillBuffer to restart the scan and get the first batch
+		err := ds.fillBuffer(true) // restart = true
+
+		// Seekdir(0) is successful even if the directory is empty (fillBuffer returns io.EOF)
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
-		return err // Return actual error from fillBuffer or nil if it was successful
+		// Return any other error encountered during the initial query
+		return err
 	}
 
-	// Seeking to arbitrary offsets is not supported
-	ds.mu.Unlock()
+	// Seeking to non-zero offsets is not supported by NtQueryDirectoryFile directly
 	return syscall.ENOSYS
 }
 
+// Close releases the directory handle and returns the buffer to the pool.
 func (ds *SeekableDirStream) Close() {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 
-	if ds.handle != 0 && ds.handle != uintptr(syscall.InvalidHandle) {
-		ntClose.Call(ds.handle)
+	if ds.handle != syscall.InvalidHandle {
+		ntClose.Call(uintptr(ds.handle))
+		ds.handle = syscall.InvalidHandle // Mark as closed
 	}
-	// Mark handle as invalid *regardless* of whether ntClose succeeded
-	ds.handle = uintptr(syscall.InvalidHandle) // Use InvalidHandle explicitly
 
+	// Return buffer to pool if it came from there
 	if ds.poolBuf && ds.buffer != nil {
-		// Optionally clear buffer before putting back? Maybe not necessary.
+		// Optional: Zero the buffer before returning? Might not be necessary.
+		// for i := range ds.buffer { ds.buffer[i] = 0 }
 		fileInfoPool.Put(ds.buffer)
 	}
 	ds.buffer = nil // Ensure buffer is nil after close
@@ -537,11 +577,11 @@ func (ds *SeekableDirStream) Close() {
 	// Reset state
 	ds.currentOffset = 0
 	ds.bytesInBuf = 0
-	ds.eof = true                 // Mark as EOF on close
-	ds.lastStatus = syscall.EBADF // Set last status to indicate closed state
+	ds.eof = true                            // Mark as EOF on close
+	ds.lastNtStatus = uintptr(syscall.EBADF) // Set status to indicate closed state
 }
 
-// Releasedir just calls Close
+// Releasedir is typically called when the directory is no longer needed by the filesystem.
 func (ds *SeekableDirStream) Releasedir(ctx context.Context, releaseFlags uint32) {
-	ds.Close()
+	ds.Close() // Just call Close
 }
