@@ -155,7 +155,7 @@ func windowsAttributesToFileMode(attrs uint32) uint32 {
 
 var fileInfoPool = sync.Pool{
 	New: func() interface{} {
-		return make([]byte, 64*1024)
+		return make([]byte, 1024*1024)
 	},
 }
 
@@ -410,6 +410,23 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 			return types.AgentDirEntry{}, syscall.EIO
 		}
 
+		// Filter out unwanted entries.
+		if entry.FileAttributes&excludedAttrs != 0 {
+			if err := ds.advanceToNextEntry(entry); err != nil {
+				return types.AgentDirEntry{}, err
+			}
+			ds.position++
+			continue
+		}
+		if entry.FileAttributes&(windows.FILE_ATTRIBUTE_SYSTEM|windows.FILE_ATTRIBUTE_HIDDEN) ==
+			(windows.FILE_ATTRIBUTE_SYSTEM | windows.FILE_ATTRIBUTE_HIDDEN) {
+			if err := ds.advanceToNextEntry(entry); err != nil {
+				continue
+			}
+			ds.position++
+			continue
+		}
+
 		fileNameBytes := entry.FileNameLength
 		structBaseSize := int(unsafe.Offsetof(entry.FileName))
 		if fileNameBytes > uint32(len(ds.buffer)) ||
@@ -425,37 +442,21 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 			fileNamePtr := unsafe.Pointer(uintptr(entryPtr) + unsafe.Offsetof(entry.FileName))
 			fileNameSlice := unsafe.Slice((*uint16)(fileNamePtr), fileNameLenInChars)
 			fileName = string(utf16.Decode(fileNameSlice))
-		}
-
-		// Filter out unwanted entries.
-		if fileName == "" {
-			if err := ds.advanceToNextEntry(entry); err != nil {
-				return types.AgentDirEntry{}, err
-			}
-			ds.position++
-			continue
-		}
-		if fileName == "." || fileName == ".." {
-			if err := ds.advanceToNextEntry(entry); err != nil {
-				return types.AgentDirEntry{}, err
-			}
-			ds.position++
-			continue
-		}
-		if entry.FileAttributes&excludedAttrs != 0 {
-			if err := ds.advanceToNextEntry(entry); err != nil {
-				return types.AgentDirEntry{}, err
-			}
-			ds.position++
-			continue
-		}
-		if entry.FileAttributes&(windows.FILE_ATTRIBUTE_SYSTEM|windows.FILE_ATTRIBUTE_HIDDEN) ==
-			(windows.FILE_ATTRIBUTE_SYSTEM | windows.FILE_ATTRIBUTE_HIDDEN) {
-			if err := ds.advanceToNextEntry(entry); err != nil {
+			if fileName == "." || fileName == ".." {
+				if err := ds.advanceToNextEntry(entry); err != nil {
+					return types.AgentDirEntry{}, err
+				}
+				ds.position++
 				continue
 			}
-			ds.position++
-			continue
+		} else {
+			if fileName == "" {
+				if err := ds.advanceToNextEntry(entry); err != nil {
+					return types.AgentDirEntry{}, err
+				}
+				ds.position++
+				continue
+			}
 		}
 
 		mode := windowsAttributesToFileMode(entry.FileAttributes)
