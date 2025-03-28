@@ -427,6 +427,7 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 			fileName = string(utf16.Decode(fileNameSlice))
 		}
 
+		// Filter out unwanted entries.
 		if fileName == "" {
 			if err := ds.advanceToNextEntry(entry); err != nil {
 				return types.AgentDirEntry{}, err
@@ -434,7 +435,6 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 			ds.position++
 			continue
 		}
-
 		if fileName == "." || fileName == ".." {
 			if err := ds.advanceToNextEntry(entry); err != nil {
 				return types.AgentDirEntry{}, err
@@ -442,7 +442,6 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 			ds.position++
 			continue
 		}
-
 		if entry.FileAttributes&excludedAttrs != 0 {
 			if err := ds.advanceToNextEntry(entry); err != nil {
 				return types.AgentDirEntry{}, err
@@ -450,8 +449,8 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 			ds.position++
 			continue
 		}
-
-		if entry.FileAttributes&(windows.FILE_ATTRIBUTE_SYSTEM|windows.FILE_ATTRIBUTE_HIDDEN) == (windows.FILE_ATTRIBUTE_SYSTEM | windows.FILE_ATTRIBUTE_HIDDEN) {
+		if entry.FileAttributes&(windows.FILE_ATTRIBUTE_SYSTEM|windows.FILE_ATTRIBUTE_HIDDEN) ==
+			(windows.FILE_ATTRIBUTE_SYSTEM | windows.FILE_ATTRIBUTE_HIDDEN) {
 			if err := ds.advanceToNextEntry(entry); err != nil {
 				continue
 			}
@@ -463,15 +462,13 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 		fuseEntry := types.AgentDirEntry{
 			Name: fileName,
 			Mode: uint32(mode),
-			Off:  ds.position, // Set the position for seeking
+			Off:  ds.position, // use the current cookie
 		}
 
 		if err := ds.advanceToNextEntry(entry); err != nil {
 			return types.AgentDirEntry{}, err
 		}
-
-		// Increment position for next entry
-		ds.position++
+		ds.position++ // increment the cookie for the next entry
 
 		return fuseEntry, nil
 	}
@@ -481,7 +478,6 @@ func (ds *SeekableDirStream) Seekdir(ctx context.Context, off uint64) error {
 	if ds == nil {
 		return syscall.EBADF
 	}
-
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -495,53 +491,51 @@ func (ds *SeekableDirStream) Seekdir(ctx context.Context, off uint64) error {
 		return syscall.EBADF
 	}
 
-	// If seeking to the beginning (offset 0), reset the stream
+	// If seeking to the beginning (offset 0), reset everything.
 	if off == 0 {
 		ds.currBufOff = 0
 		ds.bytesInBuf = 0
 		ds.eof = false
 		ds.lastNtStatus = STATUS_SUCCESS
+		ds.position = 1 // reset cookie to 1
 
 		err := ds.fillBuffer(true) // true to restart enumeration
 		if errors.Is(err, io.EOF) {
-			return nil // Empty directory is not an error
+			return nil // empty directory is not an error
 		}
 		return err
 	}
 
-	// For non-zero offsets, we need to restart enumeration and skip entries
-	// until we reach the desired position
+	// For non-zero offsets, we restart and skip entries until the cookie equals off.
 	ds.currBufOff = 0
 	ds.bytesInBuf = 0
 	ds.eof = false
 	ds.lastNtStatus = STATUS_SUCCESS
+	ds.position = 1 // reset cookie to 1
 
-	err := ds.fillBuffer(true) // Restart enumeration
+	err := ds.fillBuffer(true)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}
 
-	// Skip entries until we reach the desired offset
+	// Skip entries until ds.position reaches the desired cookie.
 	for ds.position < off {
 		if ds.eof || ds.currBufOff >= int(ds.bytesInBuf) {
 			if err := ds.fillBuffer(false); err != nil {
 				if errors.Is(err, io.EOF) {
-					// We've reached the end before finding the offset
+					// Reached end before the desired offset.
 					return nil
 				}
 				return err
 			}
 		}
 
-		// Get current entry
 		entryPtr := unsafe.Pointer(&ds.buffer[ds.currBufOff])
 		entry := (*FileDirectoryInformation)(entryPtr)
 
-		// Skip to next entry
 		if err := ds.advanceToNextEntry(entry); err != nil {
 			return err
 		}
-
 		ds.position++
 	}
 
