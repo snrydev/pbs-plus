@@ -156,7 +156,6 @@ var _ = (fs.NodeStatfser)((*Node)(nil))
 var _ = (fs.NodeAccesser)((*Node)(nil))
 var _ = (fs.NodeReleaser)((*Node)(nil))
 var _ = (fs.NodeStatxer)((*Node)(nil))
-var _ = (fs.NodeReaddirer)((*Node)(nil))
 var _ = (fs.NodeOpendirHandler)((*Node)(nil))
 
 func (n *Node) Access(ctx context.Context, mask uint32) syscall.Errno {
@@ -343,6 +342,26 @@ func (n *Node) Listxattr(ctx context.Context, dest []byte) (uint32, syscall.Errn
 
 // Lookup implements NodeLookuper
 func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	// Fix pollHack used by WaitMount
+	if name == "pollHackName" || name == ".go-fuse-poll-hack" {
+		// Create a special node that will immediately return ENOSYS for any operation
+		pollNode := nodePool.Get().(*Node)
+		pollNode.fs = n.fs
+		pollNode.name = name
+		pollNode.parent = n
+
+		stable := fs.StableAttr{
+			Mode: syscall.S_IFREG | 0644,
+		}
+
+		child := n.NewInode(ctx, pollNode, stable)
+
+		out.Mode = syscall.S_IFREG | 0644
+		out.Size = 0
+
+		return child, 0
+	}
+
 	childNode := nodePool.Get().(*Node)
 	childNode.fs = n.fs
 	childNode.parent = n
@@ -378,8 +397,21 @@ func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 	return child, 0
 }
 
+type PollHackFileHandle struct{}
+
+func (fh *PollHackFileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	// Immediately return an error for any operation
+	return nil, syscall.ENOSYS
+}
+
 // Open implements NodeOpener
 func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	// Special handling for pollHack
+	if n.name == "pollHackName" || n.name == ".go-fuse-poll-hack" {
+		// Return a minimal file handle that will cause poll to fail quickly
+		return &PollHackFileHandle{}, 0, 0
+	}
+
 	file, err := n.fs.OpenFile(n.getPath(), int(flags), 0)
 	if err != nil {
 		return nil, 0, fs.ToErrno(err)
@@ -389,16 +421,6 @@ func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 		fs:   n.fs,
 		file: &file,
 	}, 0, 0
-}
-
-// Node's Readdir implementation
-func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	stream, err := n.fs.OpenDirStream(n.getPath())
-	if err != nil {
-		return nil, fs.ToErrno(err)
-	}
-
-	return &dirStream{stream: stream}, 0
 }
 
 func (n *Node) OpendirHandle(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
