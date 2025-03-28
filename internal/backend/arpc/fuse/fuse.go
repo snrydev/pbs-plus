@@ -342,26 +342,6 @@ func (n *Node) Listxattr(ctx context.Context, dest []byte) (uint32, syscall.Errn
 
 // Lookup implements NodeLookuper
 func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	// Fix pollHack used by WaitMount
-	if name == "pollHackName" || name == ".go-fuse-poll-hack" {
-		// Create a special node that will immediately return ENOSYS for any operation
-		pollNode := nodePool.Get().(*Node)
-		pollNode.fs = n.fs
-		pollNode.name = name
-		pollNode.parent = n
-
-		stable := fs.StableAttr{
-			Mode: syscall.S_IFREG | 0644,
-		}
-
-		child := n.NewInode(ctx, pollNode, stable)
-
-		out.Mode = syscall.S_IFREG | 0644
-		out.Size = 0
-
-		return child, 0
-	}
-
 	childNode := nodePool.Get().(*Node)
 	childNode.fs = n.fs
 	childNode.parent = n
@@ -397,21 +377,8 @@ func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 	return child, 0
 }
 
-type PollHackFileHandle struct{}
-
-func (fh *PollHackFileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	// Immediately return an error for any operation
-	return nil, syscall.ENOSYS
-}
-
 // Open implements NodeOpener
 func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	// Special handling for pollHack
-	if n.name == "pollHackName" || n.name == ".go-fuse-poll-hack" {
-		// Return a minimal file handle that will cause poll to fail quickly
-		return &PollHackFileHandle{}, 0, 0
-	}
-
 	file, err := n.fs.OpenFile(n.getPath(), int(flags), 0)
 	if err != nil {
 		return nil, 0, fs.ToErrno(err)
@@ -464,7 +431,6 @@ var _ = (fs.FileReader)((*FileHandle)(nil))
 var _ = (fs.FileReleaser)((*FileHandle)(nil))
 var _ = (fs.FileLseeker)((*FileHandle)(nil))
 var _ = (fs.FileReaddirenter)((*FileHandle)(nil))
-var _ = (fs.FileSeekdirer)((*FileHandle)(nil))
 var _ = (fs.FileReleasedirer)((*FileHandle)(nil))
 
 // Read implements FileReader
@@ -502,19 +468,6 @@ func (fh *FileHandle) Readdirent(ctx context.Context) (*fuse.DirEntry, syscall.E
 	}
 
 	return &entry, 0
-}
-
-func (fh *FileHandle) Seekdir(ctx context.Context, off uint64) syscall.Errno {
-	if fh.file != nil {
-		return fs.ToErrno(os.ErrInvalid)
-	}
-
-	err := fh.fs.SeekDir(fh.dirHandleId, off)
-	if err != nil {
-		return fs.ToErrno(err)
-	}
-
-	return 0
 }
 
 func (fh *FileHandle) Releasedir(ctx context.Context, releaseFlags uint32) {
