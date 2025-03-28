@@ -526,6 +526,11 @@ func (s *AgentFSServer) handleOpenDir(req arpc.Request) (arpc.Response, error) {
 		return arpc.Response{}, err
 	}
 
+	// If the payload is empty (or "."), use the root.
+	if payload.Path == "." || payload.Path == "" {
+		fullPath = s.snapshot.Path
+	}
+
 	id := s.handleIdGen.NextID()
 	dir, err := OpendirHandle(id, fullPath, payload.Flags)
 	if err != nil {
