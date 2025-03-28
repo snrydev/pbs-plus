@@ -388,19 +388,13 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 			if ds.eof {
 				return types.AgentDirEntry{}, io.EOF
 			}
-
 			if ds.lastNtStatus != STATUS_SUCCESS && ds.lastNtStatus != STATUS_NO_MORE_FILES {
 				return types.AgentDirEntry{}, fmt.Errorf("previous NtQueryDirectoryFile failed: NTSTATUS 0x%X", ds.lastNtStatus)
 			}
-
 			fillErr := ds.fillBuffer(false)
 			if fillErr != nil {
-				if fillErr == io.EOF {
-					return types.AgentDirEntry{}, io.EOF
-				}
-				continue
+				return types.AgentDirEntry{}, fillErr
 			}
-
 			if ds.bytesInBuf == 0 || ds.currentOffset >= int(ds.bytesInBuf) {
 				ds.eof = true
 				return types.AgentDirEntry{}, io.EOF
@@ -450,6 +444,13 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 		if entry.FileAttributes&excludedAttrs != 0 {
 			if err := ds.advanceToNextEntry(entry); err != nil {
 				return types.AgentDirEntry{}, err
+			}
+			continue
+		}
+
+		if entry.FileAttributes&(windows.FILE_ATTRIBUTE_SYSTEM|windows.FILE_ATTRIBUTE_HIDDEN) == (windows.FILE_ATTRIBUTE_SYSTEM | windows.FILE_ATTRIBUTE_HIDDEN) {
+			if err := ds.advanceToNextEntry(entry); err != nil {
+				continue
 			}
 			continue
 		}
