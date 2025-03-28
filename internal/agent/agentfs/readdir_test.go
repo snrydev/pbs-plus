@@ -3,11 +3,13 @@ package agentfs
 import (
 	"context"
 	"errors" // Import errors package
+	"fmt"    // Added for large dir test
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv" // Added for large dir test
 	"syscall"
 	"testing"
 	"time"
@@ -253,4 +255,53 @@ func TestSeekableDirStream_CrossPlatform(t *testing.T) {
 		err = stream.Seekdir(ctxCancel, 1)
 		assert.ErrorIs(t, err, syscall.ENOSYS, "Seekdir(1) should return ENOSYS, not context error")
 	})
+}
+
+func TestSeekableDirStream_LargeDirectory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping large directory test in short mode")
+	}
+
+	tempDir := t.TempDir()
+	numEntries := 200000
+
+	for i := 0; i < numEntries; i++ {
+		name := fmt.Sprintf("file_%d.txt", i)
+		path := filepath.Join(tempDir, name)
+		err := os.WriteFile(path, []byte(strconv.Itoa(i)), 0644)
+		require.NoError(t, err)
+	}
+
+	ctx := context.Background()
+	dummyHandleID := uint64(2)
+	dummyFlags := uint32(0)
+
+	stream, err := OpendirHandle(dummyHandleID, tempDir, dummyFlags)
+	require.NoError(t, err)
+	require.NotNil(t, stream)
+	defer stream.Close()
+
+	count := 0
+	for {
+		entry, err := stream.Readdirent(ctx)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+
+		require.NotEqual(t, ".", entry.Name)
+		require.NotEqual(t, "..", entry.Name)
+
+		count++
+
+		if count > numEntries+10 {
+			t.Fatalf("Read significantly more entries (%d) than expected (%d)", count, numEntries)
+		}
+	}
+
+	assert.Equal(t, numEntries, count)
+
+	entry, err := stream.Readdirent(ctx)
+	assert.ErrorIs(t, err, io.EOF)
+	assert.Empty(t, entry)
 }

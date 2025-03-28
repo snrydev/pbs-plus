@@ -176,7 +176,6 @@ type SeekableDirStream struct {
 // OpendirHandle opens a directory using NtCreateFile.
 func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStream, error) {
 	ntPath := convertToNTPath(path)
-	syslog.L.Info().WithMessage(fmt.Sprintf("[DEBUG OpendirHandle] Input path: %s, NT Path: %s", path, ntPath)).Write()
 
 	pathUTF16, err := syscall.UTF16PtrFromString(ntPath)
 	if err != nil {
@@ -213,11 +212,6 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 		0,
 	)
 
-	syslog.L.Info().WithMessage(fmt.Sprintf(
-		"[DEBUG OpendirHandle] NtCreateFile result - path: %s, ntStatus: 0x%X, handle: 0x%X, ioStatusBlock.Status: 0x%X, ioStatusBlock.Information: 0x%X",
-		path, ntStatus, handle, ioStatusBlock.Status, ioStatusBlock.Information,
-	)).Write()
-
 	// Always close invalid handles before returning
 	defer func() {
 		if ntStatus != STATUS_SUCCESS || ioStatusBlock.Information != FILE_OPENED {
@@ -232,7 +226,6 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 		if handle != syscall.InvalidHandle {
 			ntClose.Call(uintptr(handle))
 		}
-		syslog.L.Info().WithMessage(fmt.Sprintf("[DEBUG OpendirHandle] NtCreateFile FAILED - path: %s, ntStatus: 0x%X", path, ntStatus)).Write()
 		var goErr error
 		switch ntStatus {
 		case STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND:
@@ -252,10 +245,6 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 		if handle != syscall.InvalidHandle {
 			ntClose.Call(uintptr(handle))
 		}
-		syslog.L.Warn().WithMessage(fmt.Sprintf(
-			"[DEBUG OpendirHandle] NtCreateFile SUCCESS but IoStatusBlock.Information != FILE_OPENED (is 0x%X) - path: %s. Treating as Not Exist.",
-			ioStatusBlock.Information, path,
-		)).Write()
 		return nil, &os.PathError{Op: "NtCreateFile", Path: path, Err: os.ErrNotExist}
 	}
 
@@ -264,8 +253,6 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 		syslog.L.Error(fmt.Errorf("NtCreateFile reported success (0x%X) but handle is invalid - path: %s", ntStatus, path)).Write()
 		return nil, &os.PathError{Op: "NtCreateFile", Path: path, Err: errors.New("reported success but got invalid handle")}
 	}
-
-	syslog.L.Info().WithMessage(fmt.Sprintf("[DEBUG OpendirHandle] NtCreateFile SUCCESS - path: %s, handle: 0x%X", path, handle)).Write()
 
 	bufInterface := fileInfoPool.Get()
 	buffer, ok := bufInterface.([]byte)
@@ -349,7 +336,6 @@ func (ds *SeekableDirStream) fillBuffer(restart bool) error {
 	default:
 		ds.eof = true
 		ds.bytesInBuf = 0
-		syslog.L.Error(fmt.Errorf("[DEBUG fillBuffer] NtQueryDirectoryFile FAIL - path: %s, ntStatus: 0x%X", ds.path, ntStatus)).Write()
 		switch ntStatus {
 		case STATUS_NO_SUCH_FILE:
 			return os.ErrNotExist
