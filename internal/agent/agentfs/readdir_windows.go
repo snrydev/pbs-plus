@@ -160,15 +160,16 @@ var fileInfoPool = sync.Pool{
 }
 
 type SeekableDirStream struct {
-	mu            sync.Mutex
-	handle        syscall.Handle
-	path          string
-	buffer        []byte
-	poolBuf       bool
-	currentOffset int
-	bytesInBuf    uintptr
-	eof           bool
-	lastNtStatus  uintptr
+	mu           sync.Mutex
+	handle       syscall.Handle
+	path         string
+	buffer       []byte
+	poolBuf      bool
+	currBufOff   int
+	bytesInBuf   uintptr
+	eof          bool
+	lastNtStatus uintptr
+	position     uint64
 }
 
 // OpendirHandle opens a directory using NtCreateFile.
@@ -262,14 +263,15 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 	}
 
 	stream := &SeekableDirStream{
-		handle:        handle,
-		path:          path,
-		buffer:        buffer,
-		poolBuf:       true,
-		currentOffset: 0,
-		bytesInBuf:    0,
-		eof:           false,
-		lastNtStatus:  STATUS_SUCCESS,
+		handle:       handle,
+		path:         path,
+		buffer:       buffer,
+		poolBuf:      true,
+		currBufOff:   0,
+		bytesInBuf:   0,
+		eof:          false,
+		lastNtStatus: STATUS_SUCCESS,
+		position:     1,
 	}
 
 	return stream, nil
@@ -295,7 +297,7 @@ func (ds *SeekableDirStream) fillBuffer(restart bool) error {
 		return syscall.EFAULT
 	}
 
-	ds.currentOffset = 0
+	ds.currBufOff = 0
 	ds.bytesInBuf = 0
 
 	var ioStatusBlock IoStatusBlock
@@ -351,16 +353,16 @@ func (ds *SeekableDirStream) advanceToNextEntry(entry *FileDirectoryInformation)
 	}
 	nextOffsetDelta := int(entry.NextEntryOffset)
 	if nextOffsetDelta <= 0 {
-		ds.currentOffset = int(ds.bytesInBuf)
+		ds.currBufOff = int(ds.bytesInBuf)
 		return nil
 	}
-	nextAbsOffset := ds.currentOffset + nextOffsetDelta
-	if nextAbsOffset <= ds.currentOffset || nextAbsOffset > int(ds.bytesInBuf) {
+	nextAbsOffset := ds.currBufOff + nextOffsetDelta
+	if nextAbsOffset <= ds.currBufOff || nextAbsOffset > int(ds.bytesInBuf) {
 		ds.lastNtStatus = uintptr(syscall.EIO)
 		ds.eof = true
 		return syscall.EIO
 	}
-	ds.currentOffset = nextAbsOffset
+	ds.currBufOff = nextAbsOffset
 	return nil
 }
 
@@ -382,7 +384,7 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 	}
 
 	for {
-		if ds.currentOffset >= int(ds.bytesInBuf) {
+		if ds.currBufOff >= int(ds.bytesInBuf) {
 			if ds.eof {
 				return types.AgentDirEntry{}, io.EOF
 			}
@@ -393,16 +395,16 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 			if fillErr != nil {
 				return types.AgentDirEntry{}, fillErr
 			}
-			if ds.bytesInBuf == 0 || ds.currentOffset >= int(ds.bytesInBuf) {
+			if ds.bytesInBuf == 0 || ds.currBufOff >= int(ds.bytesInBuf) {
 				ds.eof = true
 				return types.AgentDirEntry{}, io.EOF
 			}
 		}
 
-		entryPtr := unsafe.Pointer(&ds.buffer[ds.currentOffset])
+		entryPtr := unsafe.Pointer(&ds.buffer[ds.currBufOff])
 		entry := (*FileDirectoryInformation)(entryPtr)
 
-		if ds.currentOffset+int(unsafe.Offsetof(entry.FileName)) > int(ds.bytesInBuf) {
+		if ds.currBufOff+int(unsafe.Offsetof(entry.FileName)) > int(ds.bytesInBuf) {
 			ds.lastNtStatus = uintptr(syscall.EIO)
 			ds.eof = true
 			return types.AgentDirEntry{}, syscall.EIO
@@ -411,7 +413,7 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 		fileNameBytes := entry.FileNameLength
 		structBaseSize := int(unsafe.Offsetof(entry.FileName))
 		if fileNameBytes > uint32(len(ds.buffer)) ||
-			(ds.currentOffset+structBaseSize+int(fileNameBytes)) > int(ds.bytesInBuf) {
+			(ds.currBufOff+structBaseSize+int(fileNameBytes)) > int(ds.bytesInBuf) {
 			ds.lastNtStatus = uintptr(syscall.EIO)
 			ds.eof = true
 			return types.AgentDirEntry{}, syscall.EIO
@@ -429,6 +431,7 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 			if err := ds.advanceToNextEntry(entry); err != nil {
 				return types.AgentDirEntry{}, err
 			}
+			ds.position++
 			continue
 		}
 
@@ -436,6 +439,7 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 			if err := ds.advanceToNextEntry(entry); err != nil {
 				return types.AgentDirEntry{}, err
 			}
+			ds.position++
 			continue
 		}
 
@@ -443,6 +447,7 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 			if err := ds.advanceToNextEntry(entry); err != nil {
 				return types.AgentDirEntry{}, err
 			}
+			ds.position++
 			continue
 		}
 
@@ -450,6 +455,7 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 			if err := ds.advanceToNextEntry(entry); err != nil {
 				continue
 			}
+			ds.position++
 			continue
 		}
 
@@ -457,11 +463,15 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 		fuseEntry := types.AgentDirEntry{
 			Name: fileName,
 			Mode: uint32(mode),
+			Off:  ds.position, // Set the position for seeking
 		}
 
 		if err := ds.advanceToNextEntry(entry); err != nil {
 			return types.AgentDirEntry{}, err
 		}
+
+		// Increment position for next entry
+		ds.position++
 
 		return fuseEntry, nil
 	}
@@ -471,6 +481,13 @@ func (ds *SeekableDirStream) Seekdir(ctx context.Context, off uint64) error {
 	if ds == nil {
 		return syscall.EBADF
 	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 
@@ -478,20 +495,57 @@ func (ds *SeekableDirStream) Seekdir(ctx context.Context, off uint64) error {
 		return syscall.EBADF
 	}
 
-	if off != 0 {
-		return syscall.ENOSYS
+	// If seeking to the beginning (offset 0), reset the stream
+	if off == 0 {
+		ds.currBufOff = 0
+		ds.bytesInBuf = 0
+		ds.eof = false
+		ds.lastNtStatus = STATUS_SUCCESS
+
+		err := ds.fillBuffer(true) // true to restart enumeration
+		if errors.Is(err, io.EOF) {
+			return nil // Empty directory is not an error
+		}
+		return err
 	}
 
-	ds.currentOffset = 0
+	// For non-zero offsets, we need to restart enumeration and skip entries
+	// until we reach the desired position
+	ds.currBufOff = 0
 	ds.bytesInBuf = 0
 	ds.eof = false
 	ds.lastNtStatus = STATUS_SUCCESS
 
-	err := ds.fillBuffer(true)
-	if errors.Is(err, io.EOF) {
-		return nil
+	err := ds.fillBuffer(true) // Restart enumeration
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
 	}
-	return err
+
+	// Skip entries until we reach the desired offset
+	for ds.position < off {
+		if ds.eof || ds.currBufOff >= int(ds.bytesInBuf) {
+			if err := ds.fillBuffer(false); err != nil {
+				if errors.Is(err, io.EOF) {
+					// We've reached the end before finding the offset
+					return nil
+				}
+				return err
+			}
+		}
+
+		// Get current entry
+		entryPtr := unsafe.Pointer(&ds.buffer[ds.currBufOff])
+		entry := (*FileDirectoryInformation)(entryPtr)
+
+		// Skip to next entry
+		if err := ds.advanceToNextEntry(entry); err != nil {
+			return err
+		}
+
+		ds.position++
+	}
+
+	return nil
 }
 
 func (ds *SeekableDirStream) Close() {
@@ -512,7 +566,7 @@ func (ds *SeekableDirStream) Close() {
 	ds.buffer = nil
 	ds.poolBuf = false
 
-	ds.currentOffset = 0
+	ds.currBufOff = 0
 	ds.bytesInBuf = 0
 	ds.eof = true
 	ds.lastNtStatus = uintptr(syscall.EBADF)

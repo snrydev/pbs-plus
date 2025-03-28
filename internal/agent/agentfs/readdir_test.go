@@ -187,9 +187,34 @@ func TestSeekableDirStream_CrossPlatform(t *testing.T) {
 		require.NoError(t, err)
 		defer stream.Close()
 
-		err = stream.Seekdir(ctx, 123)
-		require.Error(t, err)
-		assert.ErrorIs(t, err, syscall.ENOSYS, "Expected ENOSYS for non-zero seek offset")
+		// Read first entry and get its position
+		firstEntry, err := stream.Readdirent(ctx)
+		require.NoError(t, err)
+		require.NotEmpty(t, firstEntry.Name)
+		firstPos := firstEntry.Off
+		require.NotZero(t, firstPos, "Entry position should not be zero")
+
+		// Read second entry
+		secondEntry, err := stream.Readdirent(ctx)
+		require.NoError(t, err)
+		require.NotEmpty(t, secondEntry.Name)
+
+		// Seek back to first entry position
+		err = stream.Seekdir(ctx, firstPos)
+		require.NoError(t, err, "Seekdir to first entry position failed")
+
+		// Read entry after seek - should match first entry
+		entryAfterSeek, err := stream.Readdirent(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, firstEntry.Name, entryAfterSeek.Name, "Entry after seek should match first entry")
+
+		// Seek to invalid position
+		err = stream.Seekdir(ctx, 999999)
+		require.NoError(t, err, "Seekdir to invalid position should not error")
+
+		// Reading after seeking to invalid position should return EOF
+		_, err = stream.Readdirent(ctx)
+		assert.ErrorIs(t, err, io.EOF, "Expected EOF after seeking to invalid position")
 	})
 
 	t.Run("OperationsAfterClose", func(t *testing.T) {
@@ -250,10 +275,45 @@ func TestSeekableDirStream_CrossPlatform(t *testing.T) {
 		cancel()
 
 		err = stream.Seekdir(ctxCancel, 0)
-		assert.NoError(t, err, "Seekdir(0) should not return context error")
+		require.Error(t, err)
+		assert.ErrorIs(t, err, context.Canceled, "Seekdir should respect context cancellation")
+	})
 
-		err = stream.Seekdir(ctxCancel, 1)
-		assert.ErrorIs(t, err, syscall.ENOSYS, "Seekdir(1) should return ENOSYS, not context error")
+	t.Run("EntryPositionsAreConsistent", func(t *testing.T) {
+		stream, err := OpendirHandle(dummyHandleID, tempDir, dummyFlags)
+		require.NoError(t, err)
+		defer stream.Close()
+
+		// Read all entries and store their positions
+		entryPositions := make(map[string]uint64)
+		for {
+			entry, err := stream.Readdirent(ctx)
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			require.NoError(t, err)
+			entryPositions[entry.Name] = entry.Off
+		}
+
+		// Verify we have positions for all entries
+		assert.Equal(t, len(expectedEntries), len(entryPositions), "Should have positions for all entries")
+
+		// Seek to beginning
+		err = stream.Seekdir(ctx, 0)
+		require.NoError(t, err)
+
+		// Read entries again and verify positions are the same
+		for {
+			entry, err := stream.Readdirent(ctx)
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			require.NoError(t, err)
+
+			expectedPos, exists := entryPositions[entry.Name]
+			assert.True(t, exists, "Entry should have a recorded position")
+			assert.Equal(t, expectedPos, entry.Off, "Entry position should be consistent")
+		}
 	})
 }
 
@@ -282,6 +342,11 @@ func TestSeekableDirStream_LargeDirectory(t *testing.T) {
 	defer stream.Close()
 
 	count := 0
+	var midEntry types.AgentDirEntry
+	var midPos int
+
+	// Read all entries, save the middle one for seeking tests
+	allEntries := make([]types.AgentDirEntry, 0, numEntries)
 	for {
 		entry, err := stream.Readdirent(ctx)
 		if errors.Is(err, io.EOF) {
@@ -292,16 +357,75 @@ func TestSeekableDirStream_LargeDirectory(t *testing.T) {
 		require.NotEqual(t, ".", entry.Name)
 		require.NotEqual(t, "..", entry.Name)
 
+		allEntries = append(allEntries, entry)
 		count++
+
+		if count == numEntries/2 {
+			midEntry = entry
+			midPos = count
+		}
 
 		if count > numEntries+10 {
 			t.Fatalf("Read significantly more entries (%d) than expected (%d)", count, numEntries)
 		}
 	}
 
-	assert.Equal(t, numEntries, count)
+	assert.Equal(t, numEntries, count, "Should read all entries")
 
-	entry, err := stream.Readdirent(ctx)
-	assert.ErrorIs(t, err, io.EOF)
-	assert.Empty(t, entry)
+	// Test seeking to middle
+	t.Run("SeekToMiddle", func(t *testing.T) {
+		require.NotEmpty(t, midEntry.Name, "Middle entry should be saved")
+		err = stream.Seekdir(ctx, midEntry.Off)
+		require.NoError(t, err, "Seeking to middle position should succeed")
+
+		// Read next entry after seek
+		nextEntry, err := stream.Readdirent(ctx)
+		require.NoError(t, err, "Reading after seek should succeed")
+
+		// Should match the entry after our midpoint in the original read
+		if midPos < len(allEntries) {
+			expectedEntry := allEntries[midPos]
+			assert.Equal(t, expectedEntry.Name, nextEntry.Name, "Entry after seek should match expected")
+		}
+
+		// Count remaining entries
+		remainingCount := 1 // Already read one
+		for {
+			_, err := stream.Readdirent(ctx)
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			require.NoError(t, err)
+			remainingCount++
+		}
+
+		// Should have approximately half the entries remaining
+		expectedRemaining := numEntries - midPos
+		assert.InDelta(t, expectedRemaining, remainingCount, float64(expectedRemaining)*0.1,
+			"Number of remaining entries should be approximately half")
+	})
+
+	// Test seeking to beginning after reading all
+	t.Run("SeekToBeginningAfterReadingAll", func(t *testing.T) {
+		err = stream.Seekdir(ctx, 0)
+		require.NoError(t, err, "Seeking to beginning should succeed")
+
+		// Read first entry
+		firstEntry, err := stream.Readdirent(ctx)
+		require.NoError(t, err, "Reading after seek should succeed")
+		assert.Equal(t, allEntries[0].Name, firstEntry.Name, "First entry after seek should match original first entry")
+
+		// Count all entries again
+		countAfterSeek := 1 // Already read one
+		for {
+			_, err := stream.Readdirent(ctx)
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			require.NoError(t, err)
+			countAfterSeek++
+		}
+
+		assert.Equal(t, numEntries, countAfterSeek, "Should read all entries after seeking to beginning")
+	})
 }

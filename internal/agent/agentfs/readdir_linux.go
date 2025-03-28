@@ -19,6 +19,7 @@ type SeekableDirStream struct {
 	entries      []fs.DirEntry
 	currentIndex int
 	lastErr      error
+	position     uint64 // Track the current position for seeking
 }
 
 type FolderHandle struct {
@@ -52,6 +53,7 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 		entries:      entries,
 		currentIndex: 0,
 		lastErr:      nil,
+		position:     1, // Start at position 1 (0 is reserved for the beginning)
 	}
 
 	return stream, nil
@@ -68,6 +70,7 @@ func (ds *SeekableDirStream) Close() {
 	ds.entries = nil
 	ds.currentIndex = 0
 	ds.lastErr = syscall.EBADF
+	ds.position = 1 // Reset position
 }
 
 func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntry, error) {
@@ -95,6 +98,8 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 	for ds.currentIndex < len(ds.entries) {
 		entry := ds.entries[ds.currentIndex]
 		ds.currentIndex++
+		currentPosition := ds.position
+		ds.position++ // Increment position for next entry
 
 		entryType := entry.Type()
 
@@ -105,6 +110,7 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 		fuseEntry := types.AgentDirEntry{
 			Name: entry.Name(),
 			Mode: uint32(entryType),
+			Off:  currentPosition, // Set the position for seeking
 		}
 
 		if entryType.IsRegular() || entryType.IsDir() {
@@ -129,13 +135,38 @@ func (ds *SeekableDirStream) Seekdir(ctx context.Context, off uint64) error {
 		return syscall.EBADF
 	}
 
+	// If seeking to the beginning (offset 0), reset the stream
 	if off == 0 {
 		ds.currentIndex = 0
 		ds.lastErr = nil
+		ds.position = 1 // Reset position to 1
 		return nil
 	}
 
-	return syscall.ENOSYS
+	// For Linux, we can directly seek to a specific index since we have all entries in memory
+	// We need to find the index that corresponds to the given offset
+
+	// Reset to beginning
+	ds.currentIndex = 0
+	ds.position = 1
+	ds.lastErr = nil
+
+	// Skip entries until we reach the desired position
+	for ds.position < off && ds.currentIndex < len(ds.entries) {
+		// Skip entries that would be filtered out in Readdirent
+		entry := ds.entries[ds.currentIndex]
+		ds.currentIndex++
+		ds.position++
+
+		entryType := entry.Type()
+		if entryType&fs.ModeSymlink != 0 || entryType&fs.ModeDevice != 0 {
+			// This entry would be skipped in Readdirent, so don't count it
+			// toward the position, but still increment the index
+			ds.position--
+		}
+	}
+
+	return nil
 }
 
 func (ds *SeekableDirStream) Releasedir(ctx context.Context, releaseFlags uint32) {

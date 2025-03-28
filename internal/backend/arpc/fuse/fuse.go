@@ -431,6 +431,7 @@ var _ = (fs.FileReader)((*FileHandle)(nil))
 var _ = (fs.FileReleaser)((*FileHandle)(nil))
 var _ = (fs.FileLseeker)((*FileHandle)(nil))
 var _ = (fs.FileReaddirenter)((*FileHandle)(nil))
+var _ = (fs.FileSeekdirer)((*FileHandle)(nil))
 var _ = (fs.FileReleasedirer)((*FileHandle)(nil))
 
 // Read implements FileReader
@@ -468,6 +469,19 @@ func (fh *FileHandle) Readdirent(ctx context.Context) (*fuse.DirEntry, syscall.E
 	}
 
 	return &entry, 0
+}
+
+func (fh *FileHandle) Seekdir(ctx context.Context, off uint64) syscall.Errno {
+	if fh.file != nil {
+		return fs.ToErrno(os.ErrInvalid)
+	}
+
+	err := fh.fs.SeekDir(fh.dirHandleId, off)
+	if err != nil {
+		return syscall.EINVAL
+	}
+
+	return 0
 }
 
 func (fh *FileHandle) Releasedir(ctx context.Context, releaseFlags uint32) {

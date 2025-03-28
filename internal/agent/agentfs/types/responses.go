@@ -484,14 +484,18 @@ func (info *AgentFileInfo) Decode(buf []byte) error {
 type AgentDirEntry struct {
 	Name string
 	Mode uint32
+	Off  uint64
 }
 
 func (entry *AgentDirEntry) Encode() ([]byte, error) {
-	enc := arpcdata.NewEncoderWithSize(len(entry.Name) + 4)
+	enc := arpcdata.NewEncoderWithSize(len(entry.Name) + 4 + 8)
 	if err := enc.WriteString(entry.Name); err != nil {
 		return nil, err
 	}
 	if err := enc.WriteUint32(entry.Mode); err != nil {
+		return nil, err
+	}
+	if err := enc.WriteUint64(entry.Off); err != nil {
 		return nil, err
 	}
 	return enc.Bytes(), nil
@@ -512,6 +516,11 @@ func (entry *AgentDirEntry) Decode(buf []byte) error {
 		return err
 	}
 	entry.Mode = mode
+	off, err := dec.ReadUint64()
+	if err != nil {
+		return err
+	}
+	entry.Off = off
 	arpcdata.ReleaseDecoder(dec)
 	return nil
 }
