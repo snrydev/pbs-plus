@@ -155,18 +155,11 @@ func windowsAttributesToFileMode(attrs uint32) uint32 {
 	return uint32(mode)
 }
 
-var fileInfoPool = sync.Pool{
-	New: func() interface{} {
-		return make([]byte, 64*1024)
-	},
-}
-
 type SeekableDirStream struct {
 	mu            sync.Mutex
 	handle        syscall.Handle // Use syscall.Handle for clarity.
 	path          string         // Original path (for error messages).
 	buffer        []byte         // Buffer for NtQueryDirectoryFile results.
-	poolBuf       bool           // Whether the buffer came from a pool.
 	currentOffset int            // Read offset within the current buffer.
 	bytesInBuf    uintptr        // Number of valid bytes within the buffer.
 	eof           bool           // True if STATUS_NO_MORE_FILES was returned.
@@ -267,22 +260,10 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 
 	syslog.L.Info().WithMessage(fmt.Sprintf("[DEBUG OpendirHandle] NtCreateFile SUCCESS - path: %s, handle: 0x%X", path, handle)).Write()
 
-	bufInterface := fileInfoPool.Get()
-	buffer, ok := bufInterface.([]byte)
-	if !ok || buffer == nil || len(buffer) == 0 {
-		ntClose.Call(uintptr(handle))
-		syslog.L.Error(fmt.Errorf("invalid buffer type or size from pool")).Write()
-		if ok && buffer != nil {
-			fileInfoPool.Put(buffer)
-		}
-		return nil, fmt.Errorf("failed to get valid buffer from pool")
-	}
-
 	stream := &SeekableDirStream{
 		handle:        handle,
 		path:          path,
-		buffer:        buffer,
-		poolBuf:       true,
+		buffer:        make([]byte, 64*1024),
 		currentOffset: 0,
 		bytesInBuf:    0,
 		eof:           false,
@@ -313,11 +294,6 @@ func (ds *SeekableDirStream) fillBuffer(restart bool) error {
 	ds.currentOffset = 0
 	ds.bytesInBuf = 0
 
-	// Explicitly zero the buffer before the API call to avoid stale data issues.
-	for i := range ds.buffer {
-		ds.buffer[i] = 0
-	}
-
 	var ioStatusBlock IoStatusBlock
 
 	ntStatus, _, _ := ntQueryDirectoryFile.Call(
@@ -340,16 +316,8 @@ func (ds *SeekableDirStream) fillBuffer(restart bool) error {
 	case STATUS_SUCCESS:
 		ds.bytesInBuf = ioStatusBlock.Information
 		if ds.bytesInBuf == 0 {
-			// Success but no bytes read means end of directory
 			ds.eof = true
 			return io.EOF
-		}
-		// Sanity check: bytesInBuf should not exceed buffer length
-		if ds.bytesInBuf > uintptr(len(ds.buffer)) {
-			ds.eof = true
-			ds.lastNtStatus = uintptr(syscall.EIO) // Indicate data corruption/overflow
-			syslog.L.Error(fmt.Errorf("[DEBUG fillBuffer] NtQueryDirectoryFile SUCCESS but returned more bytes (%d) than buffer size (%d) - path: %s", ds.bytesInBuf, len(ds.buffer), ds.path)).Write()
-			return syscall.EIO
 		}
 		ds.eof = false
 		return nil
@@ -360,14 +328,11 @@ func (ds *SeekableDirStream) fillBuffer(restart bool) error {
 		return io.EOF
 
 	default:
-		// Any other status is an error
 		ds.eof = true
 		ds.bytesInBuf = 0
 		syslog.L.Error(fmt.Errorf("[DEBUG fillBuffer] NtQueryDirectoryFile FAIL - path: %s, ntStatus: 0x%X", ds.path, ntStatus)).Write()
-
-		// Map to a Go error if possible
 		switch ntStatus {
-		case STATUS_NO_SUCH_FILE: // Can happen if dir deleted between calls?
+		case STATUS_NO_SUCH_FILE:
 			return os.ErrNotExist
 		case STATUS_ACCESS_DENIED:
 			return os.ErrPermission
@@ -533,11 +498,7 @@ func (ds *SeekableDirStream) Close() {
 		ds.handle = syscall.InvalidHandle
 	}
 
-	if ds.poolBuf && ds.buffer != nil {
-		fileInfoPool.Put(ds.buffer)
-	}
 	ds.buffer = nil
-	ds.poolBuf = false
 
 	ds.currentOffset = 0
 	ds.bytesInBuf = 0
