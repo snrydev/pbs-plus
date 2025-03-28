@@ -6,7 +6,6 @@ import (
 	"context"
 	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -116,7 +115,7 @@ func (fs *ARPCFS) OpenFile(filename string, flag int, perm os.FileMode) (ARPCFil
 		return ARPCFile{}, syscall.ENOENT
 	}
 
-	var resp types.FileHandleId
+	var resp types.HandleId
 	req := types.OpenFileReq{
 		Path: filename,
 		Flag: flag,
@@ -263,54 +262,6 @@ func (fs *ARPCFS) StatFS() (types.StatFS, error) {
 	}
 
 	return fsStat, nil
-}
-
-var bufPool = sync.Pool{
-	New: func() interface{} {
-		b := make([]byte, 1024*1024)
-		return &b
-	},
-}
-
-// ReadDir calls ReadDir via RPC and logs directory accesses.
-func (fs *ARPCFS) ReadDir(path string) (types.ReadDirEntries, error) {
-	if fs.session == nil {
-		syslog.L.Error(os.ErrInvalid).
-			WithMessage("arpc session is nil").
-			WithJob(fs.JobId).
-			Write()
-		return nil, syscall.ENOENT
-	}
-
-	bufPtr := bufPool.Get().(*[]byte)
-	buf := *bufPtr
-	defer func() {
-		if cap(buf) == cap(*bufPtr) {
-			bufPool.Put(bufPtr)
-		}
-	}()
-
-	var resp types.ReadDirEntries
-	req := types.ReadDirReq{Path: path}
-	bytesRead, err := fs.session.CallBinary(fs.ctx, fs.JobId+"/ReadDir", &req, buf)
-	if err != nil {
-		syslog.L.Error(err).
-			WithField("path", req.Path).
-			WithJob(fs.JobId).
-			Write()
-		return nil, syscall.ENOENT
-	}
-
-	err = resp.Decode(buf[:bytesRead])
-	if err != nil {
-		syslog.L.Error(err).
-			WithField("path", req.Path).
-			WithJob(fs.JobId).
-			Write()
-		return nil, syscall.ENOENT
-	}
-
-	return resp, nil
 }
 
 func (fs *ARPCFS) Root() string {

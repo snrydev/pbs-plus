@@ -20,6 +20,7 @@ type AgentFSServer struct {
 	snapshot         snapshots.Snapshot
 	handleIdGen      *idgen.IDGenerator
 	handles          *safemap.Map[uint64, *FileHandle]
+	dirHandles       *safemap.Map[uint64, *SeekableDirStream]
 	arpcRouter       *arpc.Router
 	statFs           types.StatFS
 	allocGranularity uint32
@@ -69,11 +70,14 @@ func (s *AgentFSServer) RegisterHandlers(r *arpc.Router) {
 	r.Handle(s.jobId+"/OpenFile", safeHandler(s.handleOpenFile))
 	r.Handle(s.jobId+"/Attr", safeHandler(s.handleAttr))
 	r.Handle(s.jobId+"/Xattr", safeHandler(s.handleXattr))
-	r.Handle(s.jobId+"/ReadDir", safeHandler(s.handleReadDir))
 	r.Handle(s.jobId+"/ReadAt", safeHandler(s.handleReadAt))
 	r.Handle(s.jobId+"/Lseek", safeHandler(s.handleLseek))
 	r.Handle(s.jobId+"/Close", safeHandler(s.handleClose))
 	r.Handle(s.jobId+"/StatFS", safeHandler(s.handleStatFS))
+	r.Handle(s.jobId+"/OpenDir", safeHandler(s.handleOpenDir))
+	r.Handle(s.jobId+"/Readdirent", safeHandler(s.handleReaddirent))
+	r.Handle(s.jobId+"/SeekDir", safeHandler(s.handleSeekDir))
+	r.Handle(s.jobId+"/CloseDir", safeHandler(s.handleCloseDir))
 
 	s.arpcRouter = r
 }
@@ -84,11 +88,14 @@ func (s *AgentFSServer) Close() {
 		r.CloseHandle(s.jobId + "/OpenFile")
 		r.CloseHandle(s.jobId + "/Attr")
 		r.CloseHandle(s.jobId + "/Xattr")
-		r.CloseHandle(s.jobId + "/ReadDir")
 		r.CloseHandle(s.jobId + "/ReadAt")
 		r.CloseHandle(s.jobId + "/Lseek")
 		r.CloseHandle(s.jobId + "/Close")
 		r.CloseHandle(s.jobId + "/StatFS")
+		r.CloseHandle(s.jobId + "/OpenDir")
+		r.CloseHandle(s.jobId + "/Readdirent")
+		r.CloseHandle(s.jobId + "/SeekDir")
+		r.CloseHandle(s.jobId + "/CloseDir")
 	}
 
 	s.closeFileHandles()

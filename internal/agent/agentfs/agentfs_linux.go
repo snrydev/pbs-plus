@@ -3,7 +3,6 @@
 package agentfs
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -139,7 +138,7 @@ func (s *AgentFSServer) handleOpenFile(req arpc.Request) (arpc.Response, error) 
 	s.handles.Set(handleId, fh)
 
 	// Return the handle ID to the client.
-	fhId := types.FileHandleId(handleId)
+	fhId := types.HandleId(handleId)
 	dataBytes, err := fhId.Encode()
 	if err != nil {
 		file.Close()
@@ -273,35 +272,6 @@ func (s *AgentFSServer) handleXattr(req arpc.Request) (arpc.Response, error) {
 	}, nil
 }
 
-func (s *AgentFSServer) handleReadDir(req arpc.Request) (arpc.Response, error) {
-	var payload types.ReadDirReq
-	if err := payload.Decode(req.Payload); err != nil {
-		return arpc.Response{}, err
-	}
-
-	fullDirPath, err := s.abs(payload.Path)
-	if err != nil {
-		return arpc.Response{}, err
-	}
-
-	entries, err := readDirBulk(fullDirPath)
-	if err != nil {
-		return arpc.Response{}, err
-	}
-
-	reader := bytes.NewReader(entries)
-	streamCallback := func(stream *smux.Stream) {
-		if err := binarystream.SendDataFromReader(reader, int(len(entries)), stream); err != nil {
-			syslog.L.Error(err).WithMessage("failed sending data from reader via binary stream").Write()
-		}
-	}
-
-	return arpc.Response{
-		Status:    213,
-		RawStream: streamCallback,
-	}, nil
-}
-
 func (s *AgentFSServer) handleReadAt(req arpc.Request) (arpc.Response, error) {
 	var payload types.ReadAtReq
 	if err := payload.Decode(req.Payload); err != nil {
@@ -404,4 +374,20 @@ func (s *AgentFSServer) handleClose(req arpc.Request) (arpc.Response, error) {
 	}
 
 	return arpc.Response{Status: 200, Data: data}, nil
+}
+
+func (s *AgentFSServer) handleOpenDir(req arpc.Request) (arpc.Response, error) {
+	return arpc.Response{}, os.ErrInvalid
+}
+
+func (s *AgentFSServer) handleCloseDir(req arpc.Request) (arpc.Response, error) {
+	return arpc.Response{}, os.ErrInvalid
+}
+
+func (s *AgentFSServer) handleSeekDir(req arpc.Request) (arpc.Response, error) {
+	return arpc.Response{}, os.ErrInvalid
+}
+
+func (s *AgentFSServer) handleReaddirent(req arpc.Request) (arpc.Response, error) {
+	return arpc.Response{}, os.ErrInvalid
 }

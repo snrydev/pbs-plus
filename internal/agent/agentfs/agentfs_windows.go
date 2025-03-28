@@ -149,7 +149,7 @@ func (s *AgentFSServer) handleOpenFile(req arpc.Request) (arpc.Response, error) 
 	s.handles.Set(handleId, fh)
 
 	// Return the handle ID to the client.
-	fhId := types.FileHandleId(handleId)
+	fhId := types.HandleId(handleId)
 	dataBytes, err := fhId.Encode()
 	if err != nil {
 		windows.CloseHandle(handle)
@@ -277,42 +277,6 @@ func (s *AgentFSServer) handleXattr(req arpc.Request) (arpc.Response, error) {
 	return arpc.Response{
 		Status: 200,
 		Data:   data,
-	}, nil
-}
-
-// handleReadDir first attempts to serve the directory listing from the cache.
-// It returns the cached DirEntries for that directory.
-func (s *AgentFSServer) handleReadDir(req arpc.Request) (arpc.Response, error) {
-	var payload types.ReadDirReq
-	if err := payload.Decode(req.Payload); err != nil {
-		return arpc.Response{}, err
-	}
-
-	fullDirPath, err := s.abs(payload.Path)
-	if err != nil {
-		return arpc.Response{}, err
-	}
-
-	// If the payload is empty (or "."), use the root.
-	if payload.Path == "." || payload.Path == "" {
-		fullDirPath = s.snapshot.Path
-	}
-
-	entries, err := readDirNT(fullDirPath)
-	if err != nil {
-		return arpc.Response{}, err
-	}
-
-	reader := bytes.NewReader(entries)
-	streamCallback := func(stream *smux.Stream) {
-		if err := binarystream.SendDataFromReader(reader, int(len(entries)), stream); err != nil {
-			syslog.L.Error(err).WithMessage("failed sending data from reader via binary stream").Write()
-		}
-	}
-
-	return arpc.Response{
-		Status:    213,
-		RawStream: streamCallback,
 	}, nil
 }
 
@@ -550,3 +514,102 @@ func (s *AgentFSServer) handleClose(req arpc.Request) (arpc.Response, error) {
 
 	return arpc.Response{Status: 200, Data: data}, nil
 }
+
+func (s *AgentFSServer) handleOpenDir(req arpc.Request) (arpc.Response, error) {
+	var payload types.OpenDirReq
+	if err := payload.Decode(req.Payload); err != nil {
+		return arpc.Response{}, err
+	}
+
+	id := s.handleIdGen.NextID()
+	dir, err := OpendirHandle(id, payload.Path, payload.Flags)
+	if err != nil {
+		return arpc.Response{}, err
+	}
+
+	s.dirHandles.Set(id, dir)
+
+	handleId := types.HandleId(id)
+	data, err := handleId.Encode()
+	if err != nil {
+		s.dirHandles.Del(id)
+		return arpc.Response{}, err
+	}
+
+	return arpc.Response{
+		Status: 200,
+		Data:   data,
+	}, nil
+}
+
+func (s *AgentFSServer) handleCloseDir(req arpc.Request) (arpc.Response, error) {
+	var payload types.HandleId
+	if err := payload.Decode(req.Payload); err != nil {
+		return arpc.Response{}, err
+	}
+
+	handle, ok := s.dirHandles.GetAndDel(uint64(payload))
+	if !ok {
+		return arpc.Response{}, fmt.Errorf("handle invalid")
+	}
+
+	handle.Close()
+
+	closed := arpc.StringMsg("closed")
+	data, err := closed.Encode()
+	if err != nil {
+		return arpc.Response{}, err
+	}
+
+	return arpc.Response{Status: 200, Data: data}, nil
+}
+
+func (s *AgentFSServer) handleSeekDir(req arpc.Request) (arpc.Response, error) {
+	var payload types.DirSeekReq
+	if err := payload.Decode(req.Payload); err != nil {
+		return arpc.Response{}, err
+	}
+
+	handle, ok := s.dirHandles.Get(payload.FolderHandleId)
+	if !ok {
+		return arpc.Response{}, fmt.Errorf("handle invalid")
+	}
+
+	err := handle.Seekdir(s.ctx, payload.Offset)
+	if err != nil {
+		return arpc.Response{}, err
+	}
+
+	success := arpc.StringMsg("success")
+	data, err := success.Encode()
+	if err != nil {
+		return arpc.Response{}, err
+	}
+
+	return arpc.Response{Status: 200, Data: data}, nil
+}
+
+func (s *AgentFSServer) handleReaddirent(req arpc.Request) (arpc.Response, error) {
+	var payload types.HandleId
+	if err := payload.Decode(req.Payload); err != nil {
+		return arpc.Response{}, err
+	}
+
+	handle, ok := s.dirHandles.Get(uint64(payload))
+	if !ok {
+		return arpc.Response{}, fmt.Errorf("handle invalid")
+	}
+
+	dirEnt, err := handle.Readdirent(s.ctx)
+	if err != nil {
+		return arpc.Response{}, err
+	}
+
+	data, err := dirEnt.Encode()
+	if err != nil {
+		return arpc.Response{}, err
+	}
+
+	return arpc.Response{Status: 200, Data: data}, nil
+}
+

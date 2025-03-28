@@ -49,6 +49,76 @@ func (req *OpenFileReq) Decode(buf []byte) error {
 	return nil
 }
 
+type OpenDirReq struct {
+	Path  string
+	Flags uint32
+}
+
+func (req *OpenDirReq) Encode() ([]byte, error) {
+	enc := arpcdata.NewEncoderWithSize(len(req.Path) + 4)
+	if err := enc.WriteString(req.Path); err != nil {
+		return nil, err
+	}
+	if err := enc.WriteUint32(uint32(req.Flags)); err != nil {
+		return nil, err
+	}
+	return enc.Bytes(), nil
+}
+
+func (req *OpenDirReq) Decode(buf []byte) error {
+	dec, err := arpcdata.NewDecoder(buf)
+	if err != nil {
+		return err
+	}
+	path, err := dec.ReadString()
+	if err != nil {
+		return err
+	}
+	req.Path = path
+	flag, err := dec.ReadUint32()
+	if err != nil {
+		return err
+	}
+	req.Flags = flag
+	arpcdata.ReleaseDecoder(dec)
+	return nil
+}
+
+type DirSeekReq struct {
+	FolderHandleId uint64
+	Offset         uint64
+}
+
+func (req *DirSeekReq) Encode() ([]byte, error) {
+	enc := arpcdata.NewEncoderWithSize(8 + 8)
+	if err := enc.WriteUint64(req.FolderHandleId); err != nil {
+		return nil, err
+	}
+	if err := enc.WriteUint64(req.Offset); err != nil {
+		return nil, err
+	}
+	return enc.Bytes(), nil
+}
+
+func (req *DirSeekReq) Decode(buf []byte) error {
+	dec, err := arpcdata.NewDecoder(buf)
+	if err != nil {
+		return err
+	}
+	id, err := dec.ReadUint64()
+	if err != nil {
+		return err
+	}
+	req.FolderHandleId = id
+	off, err := dec.ReadUint64()
+	if err != nil {
+		return err
+	}
+	req.Offset = off
+	arpcdata.ReleaseDecoder(dec)
+	return nil
+}
+
 // StatReq represents a request to get file stats
 type StatReq struct {
 	Path string
@@ -76,36 +146,9 @@ func (req *StatReq) Decode(buf []byte) error {
 	return nil
 }
 
-// ReadDirReq represents a request to read a directory
-type ReadDirReq struct {
-	Path string
-}
-
-func (req *ReadDirReq) Encode() ([]byte, error) {
-	enc := arpcdata.NewEncoderWithSize(len(req.Path))
-	if err := enc.WriteString(req.Path); err != nil {
-		return nil, err
-	}
-	return enc.Bytes(), nil
-}
-
-func (req *ReadDirReq) Decode(buf []byte) error {
-	dec, err := arpcdata.NewDecoder(buf)
-	if err != nil {
-		return err
-	}
-	path, err := dec.ReadString()
-	if err != nil {
-		return err
-	}
-	req.Path = path
-	arpcdata.ReleaseDecoder(dec)
-	return nil
-}
-
 // ReadReq represents a request to read from a file
 type ReadReq struct {
-	HandleID FileHandleId
+	HandleID HandleId
 	Length   int
 }
 
@@ -129,7 +172,7 @@ func (req *ReadReq) Decode(buf []byte) error {
 	if err != nil {
 		return err
 	}
-	req.HandleID = FileHandleId(handleID)
+	req.HandleID = HandleId(handleID)
 	length, err := dec.ReadUint32()
 	if err != nil {
 		return err
@@ -141,7 +184,7 @@ func (req *ReadReq) Decode(buf []byte) error {
 
 // ReadAtReq represents a request to read from a file at a specific offset
 type ReadAtReq struct {
-	HandleID FileHandleId
+	HandleID HandleId
 	Offset   int64
 	Length   int
 }
@@ -169,7 +212,7 @@ func (req *ReadAtReq) Decode(buf []byte) error {
 	if err != nil {
 		return err
 	}
-	req.HandleID = FileHandleId(handleID)
+	req.HandleID = HandleId(handleID)
 	offset, err := dec.ReadInt64()
 	if err != nil {
 		return err
@@ -186,7 +229,7 @@ func (req *ReadAtReq) Decode(buf []byte) error {
 
 // CloseReq represents a request to close a file
 type CloseReq struct {
-	HandleID FileHandleId
+	HandleID HandleId
 }
 
 func (req *CloseReq) Encode() ([]byte, error) {
@@ -206,7 +249,7 @@ func (req *CloseReq) Decode(buf []byte) error {
 	if err != nil {
 		return err
 	}
-	req.HandleID = FileHandleId(handleID)
+	req.HandleID = HandleId(handleID)
 	arpcdata.ReleaseDecoder(dec)
 	return nil
 }
@@ -267,7 +310,7 @@ func (req *BackupReq) Decode(buf []byte) error {
 
 // LseekReq represents a request to seek within a file
 type LseekReq struct {
-	HandleID FileHandleId
+	HandleID HandleId
 	Offset   int64
 	Whence   int
 }
@@ -295,7 +338,7 @@ func (req *LseekReq) Decode(buf []byte) error {
 	if err != nil {
 		return err
 	}
-	req.HandleID = FileHandleId(handleID)
+	req.HandleID = HandleId(handleID)
 	offset, err := dec.ReadInt64()
 	if err != nil {
 		return err
