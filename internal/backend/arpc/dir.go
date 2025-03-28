@@ -3,7 +3,6 @@ package arpcfs
 import (
 	"os"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -47,8 +46,6 @@ func (fs *ARPCFS) OpenDir(filename string, flags uint32) (types.HandleId, error)
 		}
 		return 0, syscall.ENOENT
 	}
-
-	atomic.AddInt64(&fs.folderCount, 1)
 
 	return resp, nil
 }
