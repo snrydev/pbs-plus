@@ -521,8 +521,13 @@ func (s *AgentFSServer) handleOpenDir(req arpc.Request) (arpc.Response, error) {
 		return arpc.Response{}, err
 	}
 
+	fullPath, err := s.abs(payload.Path)
+	if err != nil {
+		return arpc.Response{}, err
+	}
+
 	id := s.handleIdGen.NextID()
-	dir, err := OpendirHandle(id, payload.Path, payload.Flags)
+	dir, err := OpendirHandle(id, fullPath, payload.Flags)
 	if err != nil {
 		return arpc.Response{}, err
 	}
@@ -612,4 +617,3 @@ func (s *AgentFSServer) handleReaddirent(req arpc.Request) (arpc.Response, error
 
 	return arpc.Response{Status: 200, Data: data}, nil
 }
-
