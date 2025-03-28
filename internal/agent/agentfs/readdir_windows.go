@@ -229,6 +229,9 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 
 	// Check for failure first
 	if ntStatus != STATUS_SUCCESS {
+		if handle != syscall.InvalidHandle {
+			ntClose.Call(uintptr(handle))
+		}
 		syslog.L.Info().WithMessage(fmt.Sprintf("[DEBUG OpendirHandle] NtCreateFile FAILED - path: %s, ntStatus: 0x%X", path, ntStatus)).Write()
 		var goErr error
 		switch ntStatus {
@@ -246,6 +249,9 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 
 	// Check IoStatusBlock.Information
 	if ioStatusBlock.Information != FILE_OPENED {
+		if handle != syscall.InvalidHandle {
+			ntClose.Call(uintptr(handle))
+		}
 		syslog.L.Warn().WithMessage(fmt.Sprintf(
 			"[DEBUG OpendirHandle] NtCreateFile SUCCESS but IoStatusBlock.Information != FILE_OPENED (is 0x%X) - path: %s. Treating as Not Exist.",
 			ioStatusBlock.Information, path,
@@ -309,9 +315,6 @@ func (ds *SeekableDirStream) fillBuffer(restart bool) error {
 
 	var ioStatusBlock IoStatusBlock
 
-	var filterStr *uint16
-	filterStr, _ = syscall.UTF16PtrFromString("*")
-
 	ntStatus, _, _ := ntQueryDirectoryFile.Call(
 		uintptr(ds.handle),                      // Directory handle
 		0,                                       // Event
@@ -322,7 +325,7 @@ func (ds *SeekableDirStream) fillBuffer(restart bool) error {
 		uintptr(len(ds.buffer)),                 // Buffer length
 		uintptr(1),                              // FileInformationClass = FileDirectoryInformation
 		uintptr(0),                              // ReturnSingleEntry = FALSE
-		uintptr(unsafe.Pointer(filterStr)),      // FileName filter
+		0,                                       // FileName filter (NULL)
 		boolToUintptr(restart),                  // RestartScan
 	)
 
