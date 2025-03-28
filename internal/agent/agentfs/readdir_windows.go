@@ -147,9 +147,9 @@ func windowsAttributesToFileMode(attrs uint32) uint32 {
 
 	// Set regular file permissions (approximation on Windows).
 	if mode == 0 {
-		mode |= 0644 // Default permission for regular files.
+		mode |= 0644
 	} else if mode&os.ModeDir != 0 {
-		mode |= 0755 // Default permission for directories.
+		mode |= 0755
 	}
 
 	return uint32(mode)
@@ -163,30 +163,27 @@ var fileInfoPool = sync.Pool{
 
 type SeekableDirStream struct {
 	mu            sync.Mutex
-	handle        syscall.Handle // Use syscall.Handle for clarity.
-	path          string         // Original path (for error messages).
-	buffer        []byte         // Buffer for NtQueryDirectoryFile results.
-	poolBuf       bool           // Whether the buffer came from a pool.
-	currentOffset int            // Read offset within the current buffer.
-	bytesInBuf    uintptr        // Number of valid bytes within the buffer.
-	eof           bool           // True if STATUS_NO_MORE_FILES was returned.
-	lastNtStatus  uintptr        // Last NTSTATUS code from NtQueryDirectoryFile.
+	handle        syscall.Handle
+	path          string
+	buffer        []byte
+	poolBuf       bool
+	currentOffset int
+	bytesInBuf    uintptr
+	eof           bool
+	lastNtStatus  uintptr
 }
 
 // OpendirHandle opens a directory using NtCreateFile.
 func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStream, error) {
 	ntPath := convertToNTPath(path)
 
-	pathUTF16 := utf16.Encode([]rune(ntPath))
-	if len(pathUTF16) == 0 || pathUTF16[len(pathUTF16)-1] != 0 {
-		pathUTF16 = append(pathUTF16, 0)
+	pathUTF16, err := syscall.UTF16PtrFromString(ntPath)
+	if err != nil {
+		return nil, &os.PathError{Op: "UTF16PtrFromString", Path: path, Err: err}
 	}
 
 	var unicodeString UnicodeString
-	rtlInitUnicodeString.Call(
-		uintptr(unsafe.Pointer(&unicodeString)),
-		uintptr(unsafe.Pointer(&pathUTF16[0])),
-	)
+	rtlInitUnicodeString.Call(uintptr(unsafe.Pointer(&unicodeString)), uintptr(unsafe.Pointer(pathUTF16)))
 
 	var objectAttributes ObjectAttributes
 	objectAttributes.Length = uint32(unsafe.Sizeof(objectAttributes))
@@ -214,8 +211,6 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 		0,
 		0,
 	)
-
-	// Always close invalid handles before returning
 	defer func() {
 		if ntStatus != STATUS_SUCCESS || ioStatusBlock.Information != FILE_OPENED {
 			if handle != syscall.InvalidHandle {
@@ -224,7 +219,6 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 		}
 	}()
 
-	// Check for failure first
 	if ntStatus != STATUS_SUCCESS {
 		if handle != syscall.InvalidHandle {
 			ntClose.Call(uintptr(handle))
@@ -243,7 +237,6 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 		return nil, &os.PathError{Op: "NtCreateFile", Path: path, Err: goErr}
 	}
 
-	// Check IoStatusBlock.Information
 	if ioStatusBlock.Information != FILE_OPENED {
 		if handle != syscall.InvalidHandle {
 			ntClose.Call(uintptr(handle))
@@ -251,7 +244,6 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 		return nil, &os.PathError{Op: "NtCreateFile", Path: path, Err: os.ErrNotExist}
 	}
 
-	// Check handle validity
 	if handle == syscall.InvalidHandle {
 		syslog.L.Error(fmt.Errorf("NtCreateFile reported success (0x%X) but handle is invalid - path: %s", ntStatus, path)).Write()
 		return nil, &os.PathError{Op: "NtCreateFile", Path: path, Err: errors.New("reported success but got invalid handle")}
@@ -282,8 +274,10 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 	return stream, nil
 }
 
-// fillBuffer calls NtQueryDirectoryFile to refill the internal buffer.
 func (ds *SeekableDirStream) fillBuffer(restart bool) error {
+	if ds == nil {
+		return syscall.EBADF
+	}
 	if ds.eof {
 		return io.EOF
 	}
@@ -306,17 +300,17 @@ func (ds *SeekableDirStream) fillBuffer(restart bool) error {
 	var ioStatusBlock IoStatusBlock
 
 	ntStatus, _, _ := ntQueryDirectoryFile.Call(
-		uintptr(ds.handle),                      // Directory handle
-		0,                                       // Event
-		0,                                       // ApcRoutine
-		0,                                       // ApcContext
-		uintptr(unsafe.Pointer(&ioStatusBlock)), // I/O status block
-		uintptr(unsafe.Pointer(&ds.buffer[0])),  // Buffer
-		uintptr(len(ds.buffer)),                 // Buffer length
-		uintptr(1),                              // FileInformationClass = FileDirectoryInformation
-		uintptr(0),                              // ReturnSingleEntry = FALSE
-		0,                                       // FileName filter (NULL)
-		boolToUintptr(restart),                  // RestartScan
+		uintptr(ds.handle),
+		0,
+		0,
+		0,
+		uintptr(unsafe.Pointer(&ioStatusBlock)),
+		uintptr(unsafe.Pointer(&ds.buffer[0])),
+		uintptr(len(ds.buffer)),
+		uintptr(1),
+		uintptr(0),
+		0,
+		boolToUintptr(restart),
 	)
 
 	ds.lastNtStatus = ntStatus
@@ -350,8 +344,10 @@ func (ds *SeekableDirStream) fillBuffer(restart bool) error {
 	}
 }
 
-// advanceToNextEntry updates the current reading position using the NextEntryOffset field.
 func (ds *SeekableDirStream) advanceToNextEntry(entry *FileDirectoryInformation) error {
+	if ds == nil {
+		return syscall.EBADF
+	}
 	nextOffsetDelta := int(entry.NextEntryOffset)
 	if nextOffsetDelta <= 0 {
 		ds.currentOffset = int(ds.bytesInBuf)
@@ -367,9 +363,10 @@ func (ds *SeekableDirStream) advanceToNextEntry(entry *FileDirectoryInformation)
 	return nil
 }
 
-// Readdirent reads and returns the next directory entry.
 func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntry, error) {
-	// Check if the context has been canceled.
+	if ds == nil {
+		return types.AgentDirEntry{}, syscall.EBADF
+	}
 	select {
 	case <-ctx.Done():
 		return types.AgentDirEntry{}, ctx.Err()
@@ -404,7 +401,6 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 		entryPtr := unsafe.Pointer(&ds.buffer[ds.currentOffset])
 		entry := (*FileDirectoryInformation)(entryPtr)
 
-		// Sanity check: ensure that the base structure fits.
 		if ds.currentOffset+int(unsafe.Offsetof(entry.FileName)) > int(ds.bytesInBuf) {
 			ds.lastNtStatus = uintptr(syscall.EIO)
 			ds.eof = true
@@ -428,7 +424,6 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 			fileName = string(utf16.Decode(fileNameSlice))
 		}
 
-		// If filename is empty, skip this entry.
 		if fileName == "" {
 			if err := ds.advanceToNextEntry(entry); err != nil {
 				return types.AgentDirEntry{}, err
@@ -436,7 +431,6 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 			continue
 		}
 
-		// Skip "." and "..".
 		if fileName == "." || fileName == ".." {
 			if err := ds.advanceToNextEntry(entry); err != nil {
 				return types.AgentDirEntry{}, err
@@ -444,7 +438,6 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 			continue
 		}
 
-		// Skip entries with excluded attributes.
 		if entry.FileAttributes&excludedAttrs != 0 {
 			if err := ds.advanceToNextEntry(entry); err != nil {
 				return types.AgentDirEntry{}, err
@@ -466,24 +459,21 @@ func (ds *SeekableDirStream) Readdirent(ctx context.Context) (types.AgentDirEntr
 	}
 }
 
-// Seekdir resets the directory stream position.
-// Only an offset of 0 is supported; for off==0 the context cancellation is ignored.
-// For any nonzero offset, the function immediately returns syscall.ENOSYS.
 func (ds *SeekableDirStream) Seekdir(ctx context.Context, off uint64) error {
+	if ds == nil {
+		return syscall.EBADF
+	}
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 
-	// Check handle validity first
 	if ds.handle == syscall.InvalidHandle {
 		return syscall.EBADF
 	}
 
-	// For non-zero offsets, return ENOSYS
 	if off != 0 {
 		return syscall.ENOSYS
 	}
 
-	// For offset 0, proceed regardless of context state
 	ds.currentOffset = 0
 	ds.bytesInBuf = 0
 	ds.eof = false
@@ -496,8 +486,10 @@ func (ds *SeekableDirStream) Seekdir(ctx context.Context, off uint64) error {
 	return err
 }
 
-// Close releases the directory handle and returns the buffer to the pool.
 func (ds *SeekableDirStream) Close() {
+	if ds == nil {
+		return
+	}
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 
@@ -518,7 +510,9 @@ func (ds *SeekableDirStream) Close() {
 	ds.lastNtStatus = uintptr(syscall.EBADF)
 }
 
-// Releasedir releases the directory stream.
 func (ds *SeekableDirStream) Releasedir(ctx context.Context, releaseFlags uint32) {
+	if ds == nil {
+		return
+	}
 	ds.Close()
 }
