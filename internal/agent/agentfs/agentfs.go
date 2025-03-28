@@ -38,6 +38,7 @@ func NewAgentFSServer(jobId string, snapshot snapshots.Snapshot) *AgentFSServer 
 		snapshot:         snapshot,
 		jobId:            jobId,
 		handles:          safemap.New[uint64, *FileHandle](),
+		dirHandles:       safemap.New[uint64, *SeekableDirStream](),
 		ctx:              ctx,
 		ctxCancel:        cancel,
 		handleIdGen:      idgen.NewIDGenerator(),
@@ -57,7 +58,7 @@ func safeHandler(fn func(req arpc.Request) (arpc.Response, error)) func(req arpc
 			if r := recover(); r != nil {
 				syslog.L.Error(fmt.Errorf("panic in handler: %v", r)).
 					WithMessage(fmt.Sprintf("panic in handler: %v", r)).
-					WithField("payload", req.Payload).
+					WithFields(map[string]interface{}{"payload": req.Payload, "method": req.Method}).
 					Write()
 				err = os.ErrInvalid
 			}
@@ -112,4 +113,3 @@ func (s *AgentFSServer) closeFolderHandles() {
 
 	s.dirHandles.Clear()
 }
-
