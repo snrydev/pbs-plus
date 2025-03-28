@@ -48,7 +48,7 @@ type ARPCFile struct {
 	fs       *ARPCFS
 	name     string
 	offset   int64
-	handleID types.FileHandleId
+	handleID types.HandleId
 	isClosed atomic.Bool
 	jobId    string
 }

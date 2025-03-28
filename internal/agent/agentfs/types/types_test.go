@@ -75,16 +75,9 @@ func TestEncodeDecodeConcurrency(t *testing.T) {
 		})
 	})
 
-	t.Run("ReadDirReq", func(t *testing.T) {
-		original := &ReadDirReq{Path: "/path/to/dir"}
-		validateEncodeDecodeConcurrency(t, original, func() arpcdata.Encodable {
-			return &ReadDirReq{}
-		})
-	})
-
 	t.Run("ReadReq", func(t *testing.T) {
 		original := &ReadReq{
-			HandleID: FileHandleId(12345),
+			HandleID: HandleId(12345),
 			Length:   4096,
 		}
 		validateEncodeDecodeConcurrency(t, original, func() arpcdata.Encodable {
@@ -94,7 +87,7 @@ func TestEncodeDecodeConcurrency(t *testing.T) {
 
 	t.Run("ReadAtReq", func(t *testing.T) {
 		original := &ReadAtReq{
-			HandleID: FileHandleId(12345),
+			HandleID: HandleId(12345),
 			Offset:   1024,
 			Length:   4096,
 		}
@@ -104,7 +97,7 @@ func TestEncodeDecodeConcurrency(t *testing.T) {
 	})
 
 	t.Run("CloseReq", func(t *testing.T) {
-		original := &CloseReq{HandleID: FileHandleId(12345)}
+		original := &CloseReq{HandleID: HandleId(12345)}
 		validateEncodeDecodeConcurrency(t, original, func() arpcdata.Encodable {
 			return &CloseReq{}
 		})
@@ -122,22 +115,12 @@ func TestEncodeDecodeConcurrency(t *testing.T) {
 
 	t.Run("LseekReq", func(t *testing.T) {
 		original := &LseekReq{
-			HandleID: FileHandleId(12345),
+			HandleID: HandleId(12345),
 			Offset:   1024,
 			Whence:   1,
 		}
 		validateEncodeDecodeConcurrency(t, original, func() arpcdata.Encodable {
 			return &LseekReq{}
-		})
-	})
-
-	t.Run("ReadDirEntries", func(t *testing.T) {
-		original := ReadDirEntries{
-			{Name: "file1.txt", Mode: 0644},
-			{Name: "file2.txt", Mode: 0755},
-		}
-		validateEncodeDecodeConcurrency(t, &original, func() arpcdata.Encodable {
-			return &ReadDirEntries{}
 		})
 	})
 }
@@ -193,25 +176,6 @@ func validateEncodeDecodeConcurrency(t *testing.T, original arpcdata.Encodable, 
 
 // deepCompare performs a deep comparison of two Encodable objects.
 func deepCompare(a, b arpcdata.Encodable) bool {
-	// Perform a type-specific comparison for known types.
-	switch objA := a.(type) {
-	case *ReadDirEntries:
-		objB, ok := b.(*ReadDirEntries)
-		if !ok {
-			return false
-		}
-		if len(*objA) != len(*objB) {
-			return false
-		}
-		for i := range *objA {
-			if (*objA)[i] != (*objB)[i] {
-				return false
-			}
-		}
-		return true
-	}
-
-	// Fallback: Compare the encoded byte slices.
 	encodedA, errA := a.Encode()
 	encodedB, errB := b.Encode()
 

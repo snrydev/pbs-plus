@@ -151,26 +151,17 @@ var _ = (fs.NodeGetattrer)((*Node)(nil))
 var _ = (fs.NodeListxattrer)((*Node)(nil))
 var _ = (fs.NodeGetxattrer)((*Node)(nil))
 var _ = (fs.NodeLookuper)((*Node)(nil))
-var _ = (fs.NodeReaddirer)((*Node)(nil))
 var _ = (fs.NodeOpener)((*Node)(nil))
 var _ = (fs.NodeStatfser)((*Node)(nil))
 var _ = (fs.NodeAccesser)((*Node)(nil))
-var _ = (fs.NodeOpendirer)((*Node)(nil))
 var _ = (fs.NodeReleaser)((*Node)(nil))
 var _ = (fs.NodeStatxer)((*Node)(nil))
+var _ = (fs.NodeOpendirHandler)((*Node)(nil))
 
 func (n *Node) Access(ctx context.Context, mask uint32) syscall.Errno {
 	// For read-only filesystem, deny write access (bit 1)
 	if mask&2 != 0 { // 2 = write bit (traditional W_OK)
 		return syscall.EROFS
-	}
-
-	return 0
-}
-
-func (n *Node) Opendir(ctx context.Context) syscall.Errno {
-	if !n.IsDir() {
-		return syscall.ENOTDIR
 	}
 
 	return 0
@@ -386,42 +377,6 @@ func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 	return child, 0
 }
 
-// Readdir implements NodeReaddirer
-func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	entries, err := n.fs.ReadDir(n.getPath())
-	if err != nil {
-		return nil, fs.ToErrno(err)
-	}
-
-	if entries == nil {
-		entries = types.ReadDirEntries{}
-	}
-
-	result := make([]fuse.DirEntry, 0, len(entries))
-	for _, e := range entries {
-		mode := os.FileMode(e.Mode)
-		modeBits := uint32(0)
-
-		// Determine the file type using fuse.S_IF* constants
-		switch {
-		case mode.IsDir():
-			modeBits = fuse.S_IFDIR
-		case mode&os.ModeSymlink != 0:
-			modeBits = fuse.S_IFLNK
-		default:
-			modeBits = fuse.S_IFREG
-		}
-
-		// Create a DirEntry with Name, Mode, and Ino
-		result = append(result, fuse.DirEntry{
-			Name: e.Name,
-			Mode: modeBits,
-		})
-	}
-
-	return fs.NewListDirStream(result), 0
-}
-
 // Open implements NodeOpener
 func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	file, err := n.fs.OpenFile(n.getPath(), int(flags), 0)
@@ -433,6 +388,18 @@ func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 		fs:   n.fs,
 		file: &file,
 	}, 0, 0
+}
+
+func (n *Node) OpendirHandle(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	handle, err := n.fs.OpenDir(n.getPath(), flags)
+	if err != nil {
+		return 0, 0, fs.ToErrno(err)
+	}
+
+	return &FileHandle{
+		dirHandleId: handle,
+		fs:          n.fs,
+	}, fuse.FOPEN_CACHE_DIR, 0
 }
 
 func (n *Node) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
@@ -455,13 +422,17 @@ func (n *Node) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 
 // FileHandle handles file operations
 type FileHandle struct {
-	fs   *arpcfs.ARPCFS
-	file *arpcfs.ARPCFile
+	dirHandleId types.HandleId
+	fs          *arpcfs.ARPCFS
+	file        *arpcfs.ARPCFile
 }
 
 var _ = (fs.FileReader)((*FileHandle)(nil))
 var _ = (fs.FileReleaser)((*FileHandle)(nil))
 var _ = (fs.FileLseeker)((*FileHandle)(nil))
+var _ = (fs.FileReaddirenter)((*FileHandle)(nil))
+var _ = (fs.FileSeekdirer)((*FileHandle)(nil))
+var _ = (fs.FileReleasedirer)((*FileHandle)(nil))
 
 // Read implements FileReader
 func (fh *FileHandle) Read(ctx context.Context, dest []byte, offset int64) (fuse.ReadResult, syscall.Errno) {
@@ -485,4 +456,41 @@ func (fh *FileHandle) Lseek(ctx context.Context, off uint64, whence uint32) (uin
 func (fh *FileHandle) Release(ctx context.Context) syscall.Errno {
 	err := fh.file.Close()
 	return fs.ToErrno(err)
+}
+
+func (fh *FileHandle) Readdirent(ctx context.Context) (*fuse.DirEntry, syscall.Errno) {
+	if fh.file != nil {
+		return nil, fs.ToErrno(os.ErrInvalid)
+	}
+
+	entry, err := fh.fs.Readdirent(fh.dirHandleId)
+	if err != nil {
+		return nil, fs.ToErrno(err)
+	}
+
+	return &fuse.DirEntry{
+		Name: entry.Name,
+		Mode: entry.Mode,
+	}, 0
+}
+
+func (fh *FileHandle) Seekdir(ctx context.Context, off uint64) syscall.Errno {
+	if fh.file != nil {
+		return fs.ToErrno(os.ErrInvalid)
+	}
+
+	err := fh.fs.SeekDir(fh.dirHandleId, off)
+	if err != nil {
+		return fs.ToErrno(err)
+	}
+
+	return 0
+}
+
+func (fh *FileHandle) Releasedir(ctx context.Context, releaseFlags uint32) {
+	if fh.file != nil {
+		return
+	}
+
+	_ = fh.fs.CloseDir(fh.dirHandleId)
 }

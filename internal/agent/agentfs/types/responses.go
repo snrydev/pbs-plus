@@ -34,6 +34,32 @@ func (resp *LseekResp) Decode(buf []byte) error {
 	return nil
 }
 
+type DirSeekResp struct {
+	NewOffset int64
+}
+
+func (resp *DirSeekResp) Encode() ([]byte, error) {
+	enc := arpcdata.NewEncoderWithSize(8)
+	if err := enc.WriteInt64(resp.NewOffset); err != nil {
+		return nil, err
+	}
+	return enc.Bytes(), nil
+}
+
+func (resp *DirSeekResp) Decode(buf []byte) error {
+	dec, err := arpcdata.NewDecoder(buf)
+	if err != nil {
+		return err
+	}
+	newOffset, err := dec.ReadInt64()
+	if err != nil {
+		return err
+	}
+	resp.NewOffset = newOffset
+	arpcdata.ReleaseDecoder(dec)
+	return nil
+}
+
 // WinACL represents an Access Control Entry
 type WinACL struct {
 	SID        string
