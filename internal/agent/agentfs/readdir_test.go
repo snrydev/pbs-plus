@@ -323,7 +323,7 @@ func TestSeekableDirStream_LargeDirectory(t *testing.T) {
 	}
 
 	tempDir := t.TempDir()
-	numEntries := 10000
+	numEntries := 200000
 
 	for i := 0; i < numEntries; i++ {
 		name := fmt.Sprintf("file_%d.txt", i)
