@@ -23,7 +23,7 @@ const (
 	FILE_SHARE_READ              = 0x00000001
 	FILE_SHARE_WRITE             = 0x00000002
 	FILE_SHARE_DELETE            = 0x00000004
-	OPEN_EXISTING                = 3
+	OPEN_EXISTING                = 1
 	FILE_DIRECTORY_FILE          = 0x00000001
 	FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
 	OBJ_CASE_INSENSITIVE         = 0x00000040
@@ -155,11 +155,18 @@ func windowsAttributesToFileMode(attrs uint32) uint32 {
 	return uint32(mode)
 }
 
+var fileInfoPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 64*1024)
+	},
+}
+
 type SeekableDirStream struct {
 	mu            sync.Mutex
 	handle        syscall.Handle // Use syscall.Handle for clarity.
 	path          string         // Original path (for error messages).
 	buffer        []byte         // Buffer for NtQueryDirectoryFile results.
+	poolBuf       bool           // Whether the buffer came from a pool.
 	currentOffset int            // Read offset within the current buffer.
 	bytesInBuf    uintptr        // Number of valid bytes within the buffer.
 	eof           bool           // True if STATUS_NO_MORE_FILES was returned.
@@ -260,10 +267,22 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 
 	syslog.L.Info().WithMessage(fmt.Sprintf("[DEBUG OpendirHandle] NtCreateFile SUCCESS - path: %s, handle: 0x%X", path, handle)).Write()
 
+	bufInterface := fileInfoPool.Get()
+	buffer, ok := bufInterface.([]byte)
+	if !ok || buffer == nil || len(buffer) == 0 {
+		ntClose.Call(uintptr(handle))
+		syslog.L.Error(fmt.Errorf("invalid buffer type or size from pool")).Write()
+		if ok && buffer != nil {
+			fileInfoPool.Put(buffer)
+		}
+		return nil, fmt.Errorf("failed to get valid buffer from pool")
+	}
+
 	stream := &SeekableDirStream{
 		handle:        handle,
 		path:          path,
-		buffer:        make([]byte, 64*1024),
+		buffer:        buffer,
+		poolBuf:       true,
 		currentOffset: 0,
 		bytesInBuf:    0,
 		eof:           false,
@@ -498,7 +517,11 @@ func (ds *SeekableDirStream) Close() {
 		ds.handle = syscall.InvalidHandle
 	}
 
+	if ds.poolBuf && ds.buffer != nil {
+		fileInfoPool.Put(ds.buffer)
+	}
 	ds.buffer = nil
+	ds.poolBuf = false
 
 	ds.currentOffset = 0
 	ds.bytesInBuf = 0
