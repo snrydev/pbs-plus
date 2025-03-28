@@ -196,33 +196,39 @@ func OpendirHandle(handleId uint64, path string, flags uint32) (*SeekableDirStre
 		desiredAccess,
 		uintptr(unsafe.Pointer(&objectAttributes)),
 		uintptr(unsafe.Pointer(&ioStatusBlock)),
-		0, // AllocationSize (optional, 0 is fine)
-		0, // FileAttributes (not used when opening existing)
+		0, // AllocationSize
+		0, // FileAttributes
 		shareAccess,
 		OPEN_EXISTING,
 		createOptions,
-		0, // EaBuffer (optional)
-		0, // EaLength (optional)
+		0, // EaBuffer
+		0, // EaLength
 	)
 
 	syslog.L.Info().WithMessage(fmt.Sprintf("[DEBUG OpendirHandle] NtCreateFile result - path: %s, status: 0x%X, handle: 0x%X, ioStatusBlock.Status: 0x%X, syscallErr: %v\n",
 		path, status, handle, ioStatusBlock.Status, errnoSyscall)).Write()
 
-	if status != STATUS_SUCCESS {
-		syslog.L.Info().WithMessage(fmt.Sprintf("[DEBUG OpendirHandle] NtCreateFile FAILED - path: %s, status: 0x%X\n", path, status)).Write()
+	// Windows NT API can have status=0 but still have error in IoStatusBlock
+	if status != STATUS_SUCCESS || ioStatusBlock.Status != 0 {
+		syslog.L.Info().WithMessage(fmt.Sprintf("[DEBUG OpendirHandle] NtCreateFile FAILED - path: %s, status: 0x%X, ioStatusBlock.Status: 0x%X\n",
+			path, status, ioStatusBlock.Status)).Write()
 
-		// Return a clear error with the NTSTATUS code for debugging
-		// Use the original path in the error message for clarity
-		ntStatusErr := fmt.Errorf("NTSTATUS 0x%X", status)
-		// Try mapping common errors for better context, but ensure an error is returned
-		switch status {
+		// Use the most specific status for error
+		effectiveStatus := status
+		if ioStatusBlock.Status != 0 {
+			effectiveStatus = uintptr(ioStatusBlock.Status)
+		}
+
+		ntStatusErr := fmt.Errorf("NTSTATUS 0x%X", effectiveStatus)
+		switch effectiveStatus {
 		case 0xC0000034, // STATUS_OBJECT_NAME_NOT_FOUND
 			0xC000003A: // STATUS_OBJECT_PATH_NOT_FOUND
 			ntStatusErr = os.ErrNotExist
 		case 0xC0000022: // STATUS_ACCESS_DENIED
 			ntStatusErr = os.ErrPermission
-		case 0xC00000E3: // STATUS_NOT_A_DIRECTORY
-			ntStatusErr = syscall.ENOTDIR // Or map to a more specific "not a directory" error if preferred
+		case 0xC00000E3, // STATUS_NOT_A_DIRECTORY
+			0xC0000103: // STATUS_FILE_IS_A_DIRECTORY (used when opening a file as dir)
+			ntStatusErr = syscall.ENOTDIR
 		}
 		return nil, &os.PathError{Op: "NtCreateFile", Path: path, Err: ntStatusErr}
 	}
