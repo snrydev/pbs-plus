@@ -11,6 +11,7 @@ SERVICE_GROUP="pbsplus"
 ADDITIONAL_GROUP="backup"
 
 LOG_DIR="/var/log/pbs-plus"
+PBS_LOG_DIR="/var/log/proxmox-backup"
 
 CONFIG_DIR="/etc/proxmox-backup"
 DATA_DIR="/var/lib/proxmox-backup"
@@ -91,6 +92,12 @@ adjust_shared_permissions() {
         chmod -R g+rwx "$WIDGETS_DIR"
     else
         echo "Warning: Directory '$WIDGETS_DIR' not found. Skipping permission adjustment." >&2
+    fi
+    if [ -d "$PBS_LOG_DIR" ]; then
+        echo "Adjusting group permissions for '$PBS_LOG_DIR'..."
+        chmod -R g+rwx "$PBS_LOG_DIR"
+    else
+        echo "Warning: Directory '$PBS_LOG_DIR' not found. Skipping permission adjustment." >&2
     fi
 }
 
