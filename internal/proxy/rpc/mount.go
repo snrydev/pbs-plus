@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/rpc"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +18,6 @@ import (
 	arpcfs "github.com/pbs-plus/pbs-plus/internal/backend/arpc"
 	"github.com/pbs-plus/pbs-plus/internal/backend/arpc/mount"
 	"github.com/pbs-plus/pbs-plus/internal/store"
-	"github.com/pbs-plus/pbs-plus/internal/store/constants"
 	"github.com/pbs-plus/pbs-plus/internal/syslog"
 )
 
@@ -27,6 +25,7 @@ type BackupArgs struct {
 	JobId          string
 	TargetHostname string
 	Drive          string
+	MountPath      string
 }
 
 type BackupReply struct {
@@ -127,10 +126,7 @@ func (s *MountRPCService) Backup(args *BackupArgs, reply *BackupReply) error {
 
 	store.CreateFSConnection(childKey, arpcFSRPC, arpcFS)
 
-	// Set up the local mount path.
-	mntPath := filepath.Join(constants.AgentMountBasePath, args.JobId)
-
-	if err := mount.Mount(arpcFS, mntPath); err != nil {
+	if err := mount.Mount(arpcFS, args.MountPath); err != nil {
 		syslog.L.Error(err).Write()
 		reply.Status = 500
 		reply.Message = fmt.Sprintf("MountHandler: Failed to create fuse connection for target -> %v", err)
@@ -146,7 +142,7 @@ func (s *MountRPCService) Backup(args *BackupArgs, reply *BackupReply) error {
 		WithMessage("Backup successful").
 		WithFields(map[string]interface{}{
 			"jobId":  args.JobId,
-			"mount":  mntPath,
+			"mount":  args.MountPath,
 			"backup": backupMode,
 		}).Write()
 

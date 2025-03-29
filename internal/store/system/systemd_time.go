@@ -87,7 +87,7 @@ func DeleteSchedule(id string) error {
 	timerFilePath := fmt.Sprintf("pbs-plus-job-%s.timer", strings.ReplaceAll(id, " ", "-"))
 	timerFullPath := filepath.Join(constants.TimerBasePath, timerFilePath)
 
-	cmd := exec.Command("/usr/bin/systemctl", "stop", timerFilePath)
+	cmd := exec.Command("/usr/bin/systemctl", "--user", "stop", timerFilePath)
 	cmd.Env = os.Environ()
 	err := cmd.Run()
 	if err != nil {
@@ -104,7 +104,7 @@ func DeleteSchedule(id string) error {
 		return fmt.Errorf("DeleteSchedule: error deleting timer -> %w", err)
 	}
 
-	cmd = exec.Command("/usr/bin/systemctl", "daemon-reload")
+	cmd = exec.Command("/usr/bin/systemctl", "--user", "daemon-reload")
 	cmd.Env = os.Environ()
 	err = cmd.Run()
 	if err != nil {
@@ -134,7 +134,7 @@ func GetNextSchedule(job types.Job) (*time.Time, error) {
 	if !lastSchedUpdate.IsZero() && time.Now().Sub(lastSchedUpdate) <= 5*time.Second {
 		output = lastSchedString
 	} else {
-		cmd := exec.Command("systemctl", "list-timers", "--all")
+		cmd := exec.Command("systemctl", "--user", "list-timers", "--all")
 		cmd.Env = os.Environ()
 
 		var err error
@@ -211,7 +211,7 @@ func SetSchedule(job types.Job) error {
 	fullTimerPath := filepath.Join(constants.TimerBasePath, timerPath)
 
 	if job.Schedule == "" {
-		cmd := exec.Command("/usr/bin/systemctl", "disable", "--now", timerPath)
+		cmd := exec.Command("/usr/bin/systemctl", "--user", "disable", "--now", timerPath)
 		cmd.Env = os.Environ()
 		_ = cmd.Run()
 
@@ -229,7 +229,7 @@ func SetSchedule(job types.Job) error {
 		}
 	}
 
-	cmd := exec.Command("/usr/bin/systemctl", "daemon-reload")
+	cmd := exec.Command("/usr/bin/systemctl", "--user", "daemon-reload")
 	cmd.Env = os.Environ()
 	err := cmd.Run()
 	if err != nil {
@@ -240,7 +240,7 @@ func SetSchedule(job types.Job) error {
 		return nil
 	}
 
-	cmd = exec.Command("/usr/bin/systemctl", "enable", "--now", timerPath)
+	cmd = exec.Command("/usr/bin/systemctl", "--user", "enable", "--now", timerPath)
 	cmd.Env = os.Environ()
 	err = cmd.Run()
 	if err != nil {

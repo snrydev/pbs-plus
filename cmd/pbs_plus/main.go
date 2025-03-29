@@ -237,10 +237,6 @@ func main() {
 		_ = serverConfig.Unmount()
 	}()
 
-	proxy := exec.Command("/usr/bin/systemctl", "restart", "proxmox-backup-proxy")
-	proxy.Env = os.Environ()
-	_ = proxy.Run()
-
 	// Initialize token manager
 	tokenManager, err := token.NewManager(token.Config{
 		TokenExpiration: serverConfig.TokenExpiration,
@@ -282,7 +278,7 @@ func main() {
 
 	// Unmount and remove all stale mount points
 	// Get all mount points under the base path
-	mountPoints, err := filepath.Glob(filepath.Join(constants.AgentMountBasePath, "*"))
+	mountPoints, err := filepath.Glob(filepath.Join(os.TempDir(), "pbsplus-*"))
 	if err != nil {
 		syslog.L.Error(err).WithMessage("failed to find agent mount base path").Write()
 	}
@@ -295,14 +291,10 @@ func main() {
 			// Optionally handle individual unmount errors
 			syslog.L.Error(err).WithMessage("failed to unmount some mounted agents").Write()
 		}
-	}
 
-	if err := os.RemoveAll(constants.AgentMountBasePath); err != nil {
-		syslog.L.Error(err).WithMessage("failed to remove directory").Write()
-	}
-
-	if err := os.Mkdir(constants.AgentMountBasePath, 0700); err != nil {
-		syslog.L.Error(err).WithMessage("failed to recreate directory").Write()
+		if err := os.RemoveAll(mountPoint); err != nil {
+			syslog.L.Error(err).WithMessage("failed to remove directory").Write()
+		}
 	}
 
 	rpcCtx, rpcCancel := context.WithCancel(context.Background())

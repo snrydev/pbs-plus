@@ -90,7 +90,7 @@ func RemoveAllRetrySchedules(job types.Job) {
 	retryFiles, err := filepath.Glob(retryPattern)
 	if err == nil {
 		for _, file := range retryFiles {
-			cmd := exec.Command("/usr/bin/systemctl", "disable", "--now", file)
+			cmd := exec.Command("/usr/bin/systemctl", "--user", "disable", "--now", file)
 			cmd.Env = os.Environ()
 			_ = cmd.Run()
 			_ = os.Remove(file)
@@ -109,7 +109,7 @@ func RemoveAllRetrySchedules(job types.Job) {
 		}
 	}
 
-	cmd := exec.Command("/usr/bin/systemctl", "daemon-reload")
+	cmd := exec.Command("/usr/bin/systemctl", "--user", "daemon-reload")
 	cmd.Env = os.Environ()
 	_ = cmd.Run()
 }
@@ -152,7 +152,7 @@ func SetRetrySchedule(job types.Job) error {
 
 	// Now remove all existing retry timer files so that the new one is unique.
 	for _, file := range retryFiles {
-		cmd := exec.Command("/usr/bin/systemctl", "disable", "--now", file)
+		cmd := exec.Command("/usr/bin/systemctl", "--user", "disable", "--now", file)
 		cmd.Env = os.Environ()
 		_ = cmd.Run()
 
@@ -192,7 +192,7 @@ func SetRetrySchedule(job types.Job) error {
 	}
 
 	// Reload systemd daemon and enable the new retry timer.
-	cmd := exec.Command("/usr/bin/systemctl", "daemon-reload")
+	cmd := exec.Command("/usr/bin/systemctl", "--user", "daemon-reload")
 	cmd.Env = os.Environ()
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("SetRetrySchedule: error reloading daemon: %w", err)
@@ -200,7 +200,7 @@ func SetRetrySchedule(job types.Job) error {
 
 	timerFile := fmt.Sprintf("pbs-plus-job-%s-retry-%d.timer",
 		strings.ReplaceAll(job.ID, " ", "-"), newAttempt)
-	cmd = exec.Command("/usr/bin/systemctl", "enable", "--now", timerFile)
+	cmd = exec.Command("/usr/bin/systemctl", "--user", "enable", "--now", timerFile)
 	cmd.Env = os.Environ()
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("SetRetrySchedule: error enabling retry timer: %w", err)
