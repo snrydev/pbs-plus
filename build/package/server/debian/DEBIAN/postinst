@@ -1,14 +1,153 @@
-#!/bin/bash
+#!/bin/sh
+# postinst script for pbs-plus
+#
+# see: dh_installdeb(1)
+
 set -e
 
-chmod +x /usr/bin/pbs-plus
+# Define user/group names
+SERVICE_USER="pbsplus"
+SERVICE_GROUP="pbsplus"
+ADDITIONAL_GROUP="backup"
 
-systemctl daemon-reload
+LOG_DIR="/var/log/pbs-plus"
 
-# Enable the service to start on boot
-systemctl enable pbs-plus.service
+CONFIG_DIR="/etc/proxmox-backup"
+DATA_DIR="/var/lib/proxmox-backup"
+PLUS_CONFIG_DIR="/etc/proxmox-backup/pbs-plus"
 
-# Start the service
-systemctl restart pbs-plus.service
+ASSETS_DIR="/usr/share/javascript/proxmox-backup"
+WIDGETS_DIR="/usr/share/javascript/proxmox-widget-toolkit"
+
+# Function to add user/group and add user to an additional group
+add_system_user_group() {
+    # Create the primary service group if it doesn't exist
+    if ! getent group "$SERVICE_GROUP" >/dev/null; then
+        echo "Adding group '$SERVICE_GROUP'..."
+        addgroup --system "$SERVICE_GROUP" --quiet
+    fi
+
+    # Create the service user if it doesn't exist
+    if ! getent passwd "$SERVICE_USER" >/dev/null; then
+        echo "Adding system user '$SERVICE_USER'..."
+        # Add system user: non-interactive shell, no home dir, disabled password
+        adduser --system --ingroup "$SERVICE_GROUP" --no-create-home \
+                --home /nonexistent --shell /usr/sbin/nologin \
+                --gecos "pbs-plus service user" \
+                --disabled-password --quiet "$SERVICE_USER"
+    fi
+
+    # Add the service user to the additional group if it exists
+    # and the user is not already a member.
+    if getent group "$ADDITIONAL_GROUP" >/dev/null; then
+        if ! id -nG "$SERVICE_USER" | grep -qw "$ADDITIONAL_GROUP"; then
+            echo "Adding user '$SERVICE_USER' to group '$ADDITIONAL_GROUP'..."
+            adduser "$SERVICE_USER" "$ADDITIONAL_GROUP" --quiet
+        else
+            : # No-op, already a member
+        fi
+    else
+        echo "Warning: Group '$ADDITIONAL_GROUP' does not exist. Cannot add user '$SERVICE_USER'." >&2
+        # exit 1 # Uncomment if membership is mandatory
+    fi
+}
+
+# Function to set up directories owned by the service user/group
+setup_directories() {
+    if [ -n "$LOG_DIR" ]; then
+        mkdir -p "$LOG_DIR"
+        chown -R "$SERVICE_USER":"$SERVICE_GROUP" "$LOG_DIR"
+        chmod -R 750 "$LOG_DIR" # owner=rwx, group=rx, other=---
+    fi
+    if [ -n "$PLUS_CONFIG_DIR" ]; then
+        mkdir -p "$PLUS_CONFIG_DIR"
+        chown -R "$SERVICE_USER":"$SERVICE_GROUP" "$PLUS_CONFIG_DIR"
+        chmod -R 750 "$PLUS_CONFIG_DIR" # owner=rwx, group=rx, other=---
+    fi
+}
+
+# Function to adjust permissions on shared config directories
+adjust_shared_permissions() {
+    if [ -d "$CONFIG_DIR" ]; then
+        echo "Adjusting group permissions for '$CONFIG_DIR'..."
+        chmod -R g+rwx "$CONFIG_DIR"
+    else
+        echo "Warning: Directory '$CONFIG_DIR' not found. Skipping permission adjustment." >&2
+    fi
+    if [ -d "$DATA_DIR" ]; then
+        echo "Adjusting group permissions for '$DATA_DIR'..."
+        chmod -R g+rwx "$DATA_DIR"
+    else
+        echo "Warning: Directory '$DATA_DIR' not found. Skipping permission adjustment." >&2
+    fi
+    if [ -d "$ASSETS_DIR" ]; then
+        echo "Adjusting group permissions for '$ASSETS_DIR'..."
+        chmod -R g+rwx "$ASSETS_DIR"
+    else
+        echo "Warning: Directory '$ASSETS_DIR' not found. Skipping permission adjustment." >&2
+    fi
+    if [ -d "$WIDGETS_DIR" ]; then
+        echo "Adjusting group permissions for '$WIDGETS_DIR'..."
+        chmod -R g+rwx "$WIDGETS_DIR"
+    else
+        echo "Warning: Directory '$WIDGETS_DIR' not found. Skipping permission adjustment." >&2
+    fi
+}
+
+enable_user_lingering() {
+    # Check if loginctl command exists
+    if command -v loginctl >/dev/null; then
+        # Check if lingering is already enabled
+        if ! loginctl show-user "$SERVICE_USER" | grep -q "Linger=yes"; then
+            echo "Enabling systemd lingering for user '$SERVICE_USER'..."
+            # Use loginctl to enable lingering
+            loginctl enable-linger "$SERVICE_USER" || \
+                echo "Warning: Failed to enable lingering for '$SERVICE_USER'. User services may not run without login." >&2
+        else
+            echo "Systemd lingering already enabled for user '$SERVICE_USER'."
+        fi
+    else
+        echo "Warning: 'loginctl' command not found. Cannot manage user lingering." >&2
+    fi
+}
+
+case "$1" in
+    configure)
+        echo "Configuring pbs-plus..."
+
+        add_system_user_group
+        setup_directories
+        adjust_shared_permissions
+
+        if [ -x "/usr/bin/pbs-plus" ]; then
+            chmod +x "/usr/bin/pbs-plus"
+        fi
+
+        enable_user_lingering
+
+        echo "Reloading systemd configuration..."
+        systemctl daemon-reload
+
+        if [ -d /run/systemd/system ]; then
+            echo "Enabling and starting pbs-plus service..."
+            deb-systemd-helper enable pbs-plus.service >/dev/null || true
+            deb-systemd-helper update-state pbs-plus.service >/dev/null || true
+        else
+            echo "Systemd not detected, skipping service management."
+            # Add SysV init script handling here if needed
+        fi
+
+        echo "pbs-plus configuration complete."
+    ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        # Add cleanup steps here if necessary when installation fails
+    ;;
+
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+    ;;
+esac
 
 exit 0
