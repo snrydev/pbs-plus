@@ -3,6 +3,7 @@ package forks
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -182,6 +183,8 @@ func ExecBackup(sourceMode string, drive string, jobId string) (string, int, err
 		return "", -1, err
 	}
 
+	pid := cmd.Process.Pid
+
 	errScanner := bufio.NewScanner(stderrPipe)
 
 	// Read only the first line that contains backupMode.
@@ -205,6 +208,8 @@ func ExecBackup(sourceMode string, drive string, jobId string) (string, int, err
 	if err := cmd.Process.Release(); err != nil {
 		return "", cmd.Process.Pid, err
 	}
+
+	go monitorDetachedProcess(pid, jobId)
 
 	return strings.TrimSpace(backupMode), cmd.Process.Pid, nil
 }
@@ -289,4 +294,81 @@ func Backup(rpcSess *arpc.Session, sourceMode string, drive string, jobId string
 	session.fs = fs
 
 	return backupMode, nil
+}
+
+func monitorDetachedProcess(pid int, jobId string) {
+	syslog.L.Info().WithMessage("Monitoring Backup Job process PID").WithFields(map[string]interface{}{"pid": pid, "jobId": jobId})
+
+	store, _ := agent.NewBackupStore()
+
+	// Check immediately first, in case it exited very quickly after release
+	if !isProcessRunning(pid) {
+		syslog.L.Info().WithMessage("Backup Job process exited, ending session").WithFields(map[string]interface{}{"pid": pid, "jobId": jobId})
+		if existingSession, ok := activeSessions.Get(jobId); ok {
+			existingSession.Close()
+			if store != nil {
+				_ = store.EndBackup(jobId)
+			}
+		}
+		return
+	}
+
+	// Poll periodically
+	ticker := time.NewTicker(5 * time.Second) // Check every 5 seconds
+	defer ticker.Stop()
+
+	for range ticker.C {
+		if !isProcessRunning(pid) {
+			syslog.L.Info().WithMessage("Backup Job process exited, ending session").WithFields(map[string]interface{}{"pid": pid, "jobId": jobId})
+			if existingSession, ok := activeSessions.Get(jobId); ok {
+				existingSession.Close()
+				if store != nil {
+					_ = store.EndBackup(jobId)
+				}
+			}
+			return
+		}
+	}
+}
+
+func isProcessRunning(pid int) bool {
+	// os.FindProcess is the most basic check. It always returns a Process object
+	// on Unix, even if the PID doesn't exist. On Windows, it might error if
+	// the process doesn't exist, but not reliably.
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		// On Windows, an error here *might* mean it's gone, but could also be permissions.
+		// On Unix, this error is less likely unless PID is invalid (<0).
+		// Conservatively assume it might still be running if we get an unexpected error.
+		syslog.L.Error(err).WithMessage("Unable to find process").WithFields(map[string]interface{}{"pid": pid})
+		// Let's return false on error, assuming it's likely gone or inaccessible.
+		return false
+	}
+
+	// The portable way to check if a process exists is to send it signal 0.
+	// This doesn't actually send a signal, but checks permissions/existence.
+	// On Unix: Checks if the process exists and we have permission.
+	// On Windows: Checks if the process handle is valid (which os.FindProcess gives us).
+	//             This works even after Release() because FindProcess gets a *new* handle.
+	err = process.Signal(syscall.Signal(0))
+
+	// If err is nil, the process exists (or existed recently).
+	// If err is os.ErrProcessDone (on Unix), the process is definitely gone.
+	// If err is another error (e.g., permission denied on Unix, other errors on Windows),
+	// the process might still exist but we can't signal it.
+	// For simplicity, we treat nil error as "running" and any error as "not running or inaccessible".
+	if err == nil {
+		return true
+	}
+
+	// Specifically check for ErrProcessDone on Unix for a definitive "exited" state.
+	if runtime.GOOS != "windows" && errors.Is(err, os.ErrProcessDone) {
+		return false // Definitely exited on Unix
+	}
+
+	// For other errors or on Windows, log the error and assume not running/accessible.
+	// Note: On Windows, err might be "Access is denied." or "The parameter is incorrect."
+	// if the process is gone. It's not as clean as ErrProcessDone.
+	// log.Printf("Signal 0 to PID %d failed: %v. Assuming not running.", pid, err)
+	return false
 }
