@@ -8,7 +8,6 @@ import (
 	"net/rpc"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -40,16 +39,15 @@ func Mount(storeInstance *store.Store, job types.Job, target types.Target) (*Age
 		Drive:    agentDrive,
 	}
 
-	// Setup mount path
-	agentMount.Path = filepath.Join(constants.AgentMountBasePath, job.ID)
 	// Create mount directory if it doesn't exist
-	err := os.MkdirAll(agentMount.Path, 0700)
+	path, err := os.MkdirTemp("", "pbsplus-"+job.ID)
 	if err != nil {
 		agentMount.CloseMount()
 		return nil, fmt.Errorf("Mount: error creating directory \"%s\" -> %w", agentMount.Path, err)
 	}
 
-	agentMount.Unmount() // Ensure clean mount point
+	// Setup mount path
+	agentMount.Path = path
 
 	// Try mounting with retries
 	const maxRetries = 3
@@ -64,6 +62,7 @@ func Mount(storeInstance *store.Store, job types.Job, target types.Target) (*Age
 		JobId:          job.ID,
 		TargetHostname: targetHostname,
 		Drive:          agentDrive,
+		MountPath:      agentMount.Path,
 	}
 	var reply rpcmount.BackupReply
 
