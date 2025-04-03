@@ -16,6 +16,7 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/pbs-plus/pbs-plus/internal/backend/mount"
 	"github.com/pbs-plus/pbs-plus/internal/store"
+	"github.com/pbs-plus/pbs-plus/internal/store/constants"
 	"github.com/pbs-plus/pbs-plus/internal/store/proxmox"
 	"github.com/pbs-plus/pbs-plus/internal/store/system"
 	"github.com/pbs-plus/pbs-plus/internal/store/types"
@@ -77,7 +78,7 @@ func RunBackup(
 	extraExclusions *[]string,
 ) (*BackupOperation, error) {
 	jobInstanceMutex := flock.New(
-		fmt.Sprintf("/tmp/pbs-plus-mutex-job-%s", job.ID),
+		filepath.Join(constants.DbBasePath, fmt.Sprintf("pbs-plus-mutex-job-%s.lock", job.ID)),
 	)
 	if locked, err := jobInstanceMutex.TryLock(); err != nil || !locked {
 		return nil, ErrOneInstance
@@ -104,7 +105,9 @@ func RunBackup(
 		close(errorMonitorDone)
 	}
 
-	backupMutex := flock.New("/tmp/pbs-plus-mutex-lock")
+	backupMutex := flock.New(
+		filepath.Join(constants.DbBasePath, "pbs-plus-job-init.lock"),
+	)
 	defer func() {
 		backupMutex.Close()
 		_ = os.RemoveAll(backupMutex.Path())
