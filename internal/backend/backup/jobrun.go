@@ -95,6 +95,7 @@ func RunBackup(
 		job.CurrentPID = 0
 
 		_ = jobInstanceMutex.Close()
+		_ = os.RemoveAll(jobInstanceMutex.Path())
 		if agentMount != nil {
 			agentMount.Unmount()
 			agentMount.CloseMount()
