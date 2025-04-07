@@ -14,10 +14,9 @@ import (
 	"time"
 
 	"github.com/pbs-plus/pbs-plus/internal/backend/mount"
-	rpclocker "github.com/pbs-plus/pbs-plus/internal/proxy/locker"
 	"github.com/pbs-plus/pbs-plus/internal/store"
-	"github.com/pbs-plus/pbs-plus/internal/store/constants"
 	"github.com/pbs-plus/pbs-plus/internal/store/proxmox"
+	"github.com/pbs-plus/pbs-plus/internal/store/rlock"
 	"github.com/pbs-plus/pbs-plus/internal/store/system"
 	"github.com/pbs-plus/pbs-plus/internal/store/types"
 	"github.com/pbs-plus/pbs-plus/internal/syslog"
@@ -78,21 +77,18 @@ func RunBackup(
 	web bool,
 	extraExclusions *[]string,
 ) (*BackupOperation, error) {
+	initCtx, initCancel := context.WithCancel(ctx)
+	defer initCancel()
+
 	var err error
+	var jobLock *rlock.RedisLock
 
-	if storeInstance.Locker == nil {
-		storeInstance.Locker, err = rpclocker.NewLockerClient(constants.LockSocketPath)
-		if err != nil {
-			syslog.L.Error(err).WithMessage("locker server failed, restarting")
-			return nil, err
-		}
-	}
-
-	if locked, err := storeInstance.Locker.TryLock("BackupJob-" + job.ID); err != nil || !locked {
+	if jobLock, err = storeInstance.Locker.TryLock("BackupJob-" + job.ID); err != nil {
 		return nil, ErrOneInstance
 	}
+	jobLock.RefreshUntilContext(ctx)
 
-	clientLogFile := syslog.GetOrCreateBackupLoggerStatic(job.ID)
+	clientLogFile := syslog.CreateBackupLogger(job.ID)
 
 	errorMonitorDone := make(chan struct{})
 
@@ -102,7 +98,10 @@ func RunBackup(
 		utils.ClearIOStats(job.CurrentPID)
 		job.CurrentPID = 0
 
-		storeInstance.Locker.Unlock("BackupJob-" + job.ID)
+		if jobLock != nil {
+			jobLock.Unlock()
+		}
+
 		if agentMount != nil {
 			agentMount.Unmount()
 			agentMount.CloseMount()
@@ -127,11 +126,13 @@ func RunBackup(
 		}
 	}
 
-	if err := storeInstance.Locker.Lock("BackupJobInitializing"); err != nil {
+	if initLock, err := storeInstance.Locker.Lock("BackupJobInitializing"); err != nil {
 		errCleanUp()
 		return nil, fmt.Errorf("%w: %v", ErrBackupMutexLock, err)
+	} else {
+		initLock.RefreshUntilContext(initCtx)
+		defer initLock.Unlock()
 	}
-	defer storeInstance.Locker.Unlock("BackupJobInitializing")
 
 	if proxmox.Session.APIToken == nil {
 		errCleanUp()
@@ -299,7 +300,9 @@ func RunBackup(
 	go func() {
 		defer wg.Done()
 		defer func() {
-			storeInstance.Locker.Unlock("BackupJob-" + job.ID)
+			if jobLock != nil {
+				jobLock.Unlock()
+			}
 		}()
 
 		if err := cmd.Wait(); err != nil {

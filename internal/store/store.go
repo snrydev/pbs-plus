@@ -10,9 +10,9 @@ import (
 	"github.com/pbs-plus/pbs-plus/internal/arpc"
 	"github.com/pbs-plus/pbs-plus/internal/auth/certificates"
 	arpcfs "github.com/pbs-plus/pbs-plus/internal/backend/arpc"
-	rpclocker "github.com/pbs-plus/pbs-plus/internal/proxy/locker"
 	"github.com/pbs-plus/pbs-plus/internal/store/constants"
 	"github.com/pbs-plus/pbs-plus/internal/store/database"
+	"github.com/pbs-plus/pbs-plus/internal/store/rlock"
 	"github.com/pbs-plus/pbs-plus/internal/store/sqlite"
 	"github.com/pbs-plus/pbs-plus/internal/syslog"
 	"github.com/pbs-plus/pbs-plus/internal/utils/safemap"
@@ -28,7 +28,7 @@ type Store struct {
 	Database           *sqlite.Database
 	ARPCSessionManager *arpc.SessionManager
 	arpcFS             *safemap.Map[string, *arpcfs.ARPCFS]
-	Locker             *rpclocker.LockerClient
+	Locker             *rlock.RedisInstance
 }
 
 func Initialize(ctx context.Context, paths map[string]string) (*Store, error) {
@@ -40,7 +40,9 @@ func Initialize(ctx context.Context, paths map[string]string) (*Store, error) {
 		}
 	}
 
-	db, err := sqlite.Initialize(sqlitePath)
+	locker := rlock.NewRedis(ctx)
+
+	db, err := sqlite.Initialize(sqlitePath, locker)
 	if err != nil {
 		return nil, fmt.Errorf("Initialize: error initializing database -> %w", err)
 	}
@@ -56,6 +58,7 @@ func Initialize(ctx context.Context, paths map[string]string) (*Store, error) {
 		Database:           db,
 		arpcFS:             safemap.New[string, *arpcfs.ARPCFS](),
 		ARPCSessionManager: arpc.NewSessionManager(),
+		Locker:             locker,
 	}
 
 	return store, nil

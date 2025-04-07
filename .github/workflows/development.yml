@@ -16,6 +16,9 @@ jobs:
         with:
           go-version: '1.24'
           cache: true
+      - uses: shogo82148/actions-setup-redis@v1
+        with:
+          redis-version: "7.x"
       - run: go mod download
       - name: Run Linux tests
         shell: bash
@@ -50,7 +53,7 @@ jobs:
         maintainer: Son Roy Almerol <github@snry.me>
         version: 'refs/tags/v0.0.0'
         arch: 'amd64'
-        depends: 'proxmox-backup-server (>= 3.2), proxmox-backup-client (>= 3.2.5), fuse3'
+        depends: 'proxmox-backup-server (>= 3.2), proxmox-backup-client (>= 3.2.5), fuse3, redis'
         desc: 'PBS Plus is a project focused on extending Proxmox Backup Server (PBS) with advanced features to create a more competitive backup solution'
         homepage: 'https://github.com/${{ github.repository }}'
     - name: Pre-release dev build

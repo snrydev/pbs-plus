@@ -14,8 +14,8 @@ import (
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/pbs-plus/pbs-plus/internal/auth/token"
-	rpclocker "github.com/pbs-plus/pbs-plus/internal/proxy/locker"
 	"github.com/pbs-plus/pbs-plus/internal/store/constants"
+	"github.com/pbs-plus/pbs-plus/internal/store/rlock"
 	"github.com/pbs-plus/pbs-plus/internal/store/types"
 	"github.com/pbs-plus/pbs-plus/internal/syslog"
 )
@@ -27,7 +27,8 @@ type Database struct {
 	readDb       *sql.DB
 	writeDb      *sql.DB
 	writeMu      sync.Mutex
-	writeLocker  *rpclocker.LockerClient
+	writeLocker  *rlock.RedisInstance
+	currLock     *rlock.RedisLock
 	dbPath       string
 	TokenManager *token.Manager
 }
@@ -36,7 +37,7 @@ type Database struct {
 // creates all necessary tables if they do not exist,
 // and then (optionally) fills any default items.
 // It returns a pointer to a Database instance.
-func Initialize(dbPath string) (*Database, error) {
+func Initialize(dbPath string, locker *rlock.RedisInstance) (*Database, error) {
 	if dbPath == "" {
 		dbPath = "/etc/proxmox-backup/pbs-plus/plus.db"
 	}
@@ -61,11 +62,6 @@ func Initialize(dbPath string) (*Database, error) {
 	_, err = writeDb.Exec("PRAGMA journal_mode=WAL;")
 	if err != nil {
 		return nil, fmt.Errorf("Initialize: error DB: %w", err)
-	}
-
-	locker, err := rpclocker.NewLockerClient(constants.LockSocketPath)
-	if err != nil {
-		locker = nil
 	}
 
 	database := &Database{
@@ -112,7 +108,9 @@ func (d *Database) writeLock() {
 
 func (d *Database) writeUnlock() {
 	if d.writeLocker != nil {
-		d.writeLocker.Unlock("sqlite-db-write")
+		if d.currLock != nil {
+			d.currLock.Unlock()
+		}
 		return
 	}
 

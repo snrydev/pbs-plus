@@ -1,10 +1,12 @@
 module github.com/pbs-plus/pbs-plus
 
 go 1.24.0
+
 require (
 	github.com/KimMachineGun/automemlimit v0.7.1
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/billgraziano/dpapi v0.5.0
+	github.com/bsm/redislock v0.9.4
 	github.com/containers/winquit v1.1.0
 	github.com/fsnotify/fsnotify v1.8.0
 	github.com/gobwas/glob v0.2.3
@@ -16,6 +18,7 @@ require (
 	github.com/mxk/go-vss v1.2.0
 	github.com/pkg/errors v0.9.1
 	github.com/puzpuzpuz/xsync/v3 v3.5.1
+	github.com/redis/go-redis/v9 v9.0.3
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.10.0
 	github.com/xtaci/smux v1.5.34
@@ -28,7 +31,9 @@ require (
 )
 
 require (
+	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
