@@ -83,10 +83,9 @@ func RunBackup(
 	var err error
 	var jobLock *rlock.RedisLock
 
-	if jobLock, err = storeInstance.Locker.TryLock("BackupJob-" + job.ID); err != nil {
+	if jobLock, err = storeInstance.Locker.TryLock(ctx, "BackupJob-"+job.ID); err != nil {
 		return nil, ErrOneInstance
 	}
-	jobLock.RefreshUntilContext(ctx)
 
 	clientLogFile := syslog.CreateBackupLogger(job.ID)
 
@@ -126,11 +125,10 @@ func RunBackup(
 		}
 	}
 
-	if initLock, err := storeInstance.Locker.Lock("BackupJobInitializing"); err != nil {
+	if initLock, err := storeInstance.Locker.Lock(initCtx, "BackupJobInitializing"); err != nil {
 		errCleanUp()
 		return nil, fmt.Errorf("%w: %v", ErrBackupMutexLock, err)
 	} else {
-		initLock.RefreshUntilContext(initCtx)
 		defer initLock.Unlock()
 	}
 

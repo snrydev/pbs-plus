@@ -40,7 +40,10 @@ func Initialize(ctx context.Context, paths map[string]string) (*Store, error) {
 		}
 	}
 
-	locker := rlock.NewRedis(ctx)
+	locker, err := rlock.NewRedis(ctx, rlock.RedisInstanceOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("Initialize: error initializing database -> %w", err)
+	}
 
 	db, err := sqlite.Initialize(sqlitePath, locker)
 	if err != nil {

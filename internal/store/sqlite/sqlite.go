@@ -24,10 +24,12 @@ const maxAttempts = 100
 
 // Database is our SQLite-backed store.
 type Database struct {
+	ctx          context.Context
 	readDb       *sql.DB
 	writeDb      *sql.DB
 	writeMu      sync.Mutex
 	writeLocker  *rlock.RedisInstance
+	currLockMu   sync.Mutex
 	currLock     *rlock.RedisLock
 	dbPath       string
 	TokenManager *token.Manager
@@ -99,7 +101,15 @@ func Initialize(dbPath string, locker *rlock.RedisInstance) (*Database, error) {
 
 func (d *Database) writeLock() {
 	if d.writeLocker != nil {
-		d.writeLocker.Lock("sqlite-db-write")
+		var err error
+		d.currLockMu.Lock()
+		defer d.currLockMu.Unlock()
+
+		d.currLock, err = d.writeLocker.Lock(d.ctx, "sqlite-db-write")
+		if err != nil {
+			syslog.L.Error(err).WithField("key", "sqlite-db-write").Write()
+			return
+		}
 		return
 	}
 
@@ -109,7 +119,11 @@ func (d *Database) writeLock() {
 func (d *Database) writeUnlock() {
 	if d.writeLocker != nil {
 		if d.currLock != nil {
+			d.currLockMu.Lock()
+			defer d.currLockMu.Unlock()
+
 			d.currLock.Unlock()
+			d.currLock = nil
 		}
 		return
 	}
