@@ -39,7 +39,7 @@ type Database struct {
 // creates all necessary tables if they do not exist,
 // and then (optionally) fills any default items.
 // It returns a pointer to a Database instance.
-func Initialize(dbPath string, locker *rlock.RedisInstance) (*Database, error) {
+func Initialize(ctx context.Context, dbPath string, locker *rlock.RedisInstance) (*Database, error) {
 	if dbPath == "" {
 		dbPath = "/etc/proxmox-backup/pbs-plus/plus.db"
 	}
@@ -67,6 +67,7 @@ func Initialize(dbPath string, locker *rlock.RedisInstance) (*Database, error) {
 	}
 
 	database := &Database{
+		ctx:         ctx,
 		dbPath:      dbPath,
 		readDb:      readDb,
 		writeDb:     writeDb,

@@ -45,7 +45,7 @@ func Initialize(ctx context.Context, paths map[string]string) (*Store, error) {
 		return nil, fmt.Errorf("Initialize: error initializing database -> %w", err)
 	}
 
-	db, err := sqlite.Initialize(sqlitePath, locker)
+	db, err := sqlite.Initialize(ctx, sqlitePath, locker)
 	if err != nil {
 		return nil, fmt.Errorf("Initialize: error initializing database -> %w", err)
 	}
