@@ -1,0 +1,178 @@
+project_name: pbs-plus # Or ${{ github.event.repository.name }}
+
+env:
+  - CGO_ENABLED=0
+
+# Before hooks run before anything else. Useful for setup.
+before:
+  hooks:
+    # Could potentially run your pre-packaging scripts here if they do more
+    # than just copy files (e.g., generate something).
+    # - go mod tidy
+    # - go generate ./...
+    - echo "Starting GoReleaser build..."
+
+builds:
+  - id: pbs_plus_server
+    binary: pbs_plus # Output binary name
+    dir: ./cmd/pbs_plus
+    ldflags:
+      - -s -w -X main.Version={{.Version}}
+    goos:
+      - linux
+    goarch:
+      - amd64
+    tags:
+      - osusergo
+      - netgo
+      - static_build
+
+  # Build configuration for the 'pbs-plus-agent' (Linux and Windows)
+  - id: pbs_plus_agent
+    binary: pbs-plus-agent
+    dir: ./cmd # Assuming both agent commands are subdirs here
+    ldflags:
+      - -s -w -X main.Version={{.Version}}
+      # Apply windowsgui flag only for windows builds
+      - "{{ if eq .Os \"windows\" }}-H=windowsgui{{ end }}"
+    goos:
+      - linux
+      - windows
+    goarch:
+      - amd64
+    # Override main path specifically for windows agent if needed
+    # (GoReleaser v1.17+ allows overrides)
+    # Alternatively, keep separate build entries if structure differs significantly
+    overrides:
+      - goos: linux
+        main: ./cmd/linux_agent # Path relative to dir
+      - goos: windows
+        main: ./cmd/windows_agent # Path relative to dir
+
+  # Build configuration for the 'pbs-plus-updater' (Windows only)
+  - id: pbs_plus_updater
+    binary: pbs-plus-updater
+    dir: ./cmd/windows_updater
+    ldflags:
+      - -s -w -X main.Version={{.Version}} -H=windowsgui
+    goos:
+      - windows
+    goarch:
+      - amd64
+
+nfpms:
+  - id: pbs_plus_server_pkg
+    package_name: pbs-plus # Use actual package name
+    builds:
+      - pbs_plus_server
+    formats:
+      - deb
+      - rpm
+    vendor: PBS Plus
+    homepage: "https://github.com/${{ github.repository }}" # Use env var if needed
+    maintainer: Son Roy Almerol <github@snry.me>
+    description: PBS Plus extends Proxmox Backup Server (PBS) with advanced features.
+    license: Apache-2.0 # Replace with your actual license (e.g., MIT, GPL-3.0)
+    # Dependencies for Debian/Ubuntu
+    deb:
+      depends:
+        - proxmox-backup-server (>= 3.2)
+        - proxmox-backup-client (>= 3.2.5)
+        - fuse3
+    contents:
+      # Copy the built binary to /usr/bin
+      - src: "{{ .Path }}" # GoReleaser provides the path to the built binary
+        dst: /usr/bin/{{ .Binary }}
+        file_info:
+          mode: 0755 # Ensure executable permissions
+      - src: ./build/package/server/debian/pbs-plus.service
+        dst: /lib/systemd/system/pbs-plus.service
+      - src: ./build/package/server/debian/etc/
+        dst: /etc/pbs-plus/
+        type: config|noreplace # Mark as config files
+
+  # Package definition for 'pbs-plus-agent' (Linux only)
+  - id: pbs_plus_agent_pkg
+    package_name: pbs-plus-agent
+    # Only build packages for the linux build of pbs_plus_agent
+    builds:
+      - pbs_plus_agent
+    filter: "contains(goos, \"linux\")" # Ensure only linux builds are packaged
+    formats:
+      - deb
+      - rpm
+    vendor: Son Roy Almerol
+    homepage: "https://github.com/${{ github.repository }}"
+    maintainer: Son Roy Almerol <github@snry.me>
+    description: Agent for PBS Plus backup solution.
+    license: Apache-2.0
+    contents:
+      - src: "{{ .Path }}"
+        dst: /usr/bin/{{ .Binary }}
+        file_info:
+          mode: 0755
+      # Add agent-specific files (systemd, configs) if needed
+      # Example:
+      # - src: ./build/package/linux_agent/debian/pbs-plus-agent.service
+      #   dst: /lib/systemd/system/pbs-plus-agent.service
+      # - src: ./build/package/linux_agent/debian/etc/ # Adjust path
+      #   dst: /etc/pbs-plus-agent/
+      #   type: config|noreplace
+
+# Create archives (e.g., .zip, .tar.gz)
+archives:
+  # Archive for Linux binaries (optional, as we have packages)
+  - id: linux_archives
+    builds: # Reference build IDs
+      - pbs_plus_server
+      - pbs_plus_agent
+    filter: "contains(goos, \"linux\")" # Only linux builds
+    format: tar.gz # Or zip
+    # You can add files here too if you want more than just the binary
+    # files:
+    #   - src: path/to/readme.md
+
+  # Archive for Windows binaries
+  - id: windows_archives
+    builds:
+      - pbs_plus_agent
+      - pbs_plus_updater
+    filter: "contains(goos, \"windows\")" # Only windows builds
+    format: zip
+    # Include other files needed for Windows release (e.g., README, LICENSE)
+    files:
+      - LICENSE # Example: include LICENSE file
+      - README.md # Example: include README
+
+# Enable UPX compression for specified builds
+upx:
+  - enabled: true
+    # Apply UPX to all builds (can filter by ID, GOOS, GOARCH if needed)
+    # ids:
+    #   - pbs_plus_server
+    #   - pbs_plus_agent
+    #   - pbs_plus_updater
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  name_template: "{{ incpatch .Version }}-next"
+
+# Configure the GitHub Release
+release:
+  # Drafts the release, remove if you want it published automatically
+  draft: false
+  # prerelease: auto # Mark as pre-release if version contains hyphen/metadata
+  # You can customize the release notes
+  # changelog:
+  #   sort: asc
+  #   filters:
+  #     exclude:
+  #       - '^docs:'
+  #       - '^test:'
+
+# Optional: Sign artifacts with GPG
+# signs:
+#   - artifacts: checksum
+#     args: ["--batch", "--local-user", "{{ .Env.GPG_FINGERPRINT }}", "--output", "${signature}", "--detach-sign", "${artifact}"]
