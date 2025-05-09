@@ -1,6 +1,6 @@
 //go:build linux
 
-package jobs
+package database_jobs
 
 import (
 	"encoding/json"
@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
-	"strings"
 
 	"github.com/pbs-plus/pbs-plus/internal/backend/backup"
 	"github.com/pbs-plus/pbs-plus/internal/proxy/controllers"
@@ -18,35 +17,17 @@ import (
 	"github.com/pbs-plus/pbs-plus/internal/utils"
 )
 
-func D2DJobHandler(storeInstance *store.Store) http.HandlerFunc {
+func DBJobHandler(storeInstance *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Invalid HTTP method", http.StatusBadRequest)
 			return
 		}
 
-		allJobs, err := storeInstance.Database.GetAllJobs()
+		allJobs, err := storeInstance.Database.GetAllDatabaseJobs()
 		if err != nil {
 			controllers.WriteErrorResponse(w, err)
 			return
-		}
-
-		for i, job := range allJobs {
-			splittedTargetName := strings.Split(job.Target, " - ")
-			targetHostname := splittedTargetName[0]
-			childKey := targetHostname + "|" + job.ID
-			arpcfs := store.GetSessionFS(childKey)
-			if arpcfs == nil {
-				continue
-			}
-
-			stats := arpcfs.GetStats()
-
-			allJobs[i].CurrentFileCount = int(stats.FilesAccessed)
-			allJobs[i].CurrentFolderCount = int(stats.FoldersAccessed)
-			allJobs[i].CurrentBytesTotal = int(stats.TotalBytes)
-			allJobs[i].CurrentBytesSpeed = int(stats.ByteReadSpeed)
-			allJobs[i].CurrentFilesSpeed = int(stats.FileAccessSpeed)
 		}
 
 		digest, err := utils.CalculateDigest(allJobs)
@@ -73,13 +54,13 @@ func ExtJsJobRunHandler(storeInstance *store.Store) http.HandlerFunc {
 			return
 		}
 
-		job, err := storeInstance.Database.GetJob(utils.DecodePath(r.PathValue("job")))
+		job, err := storeInstance.Database.GetDatabaseJob(utils.DecodePath(r.PathValue("job")))
 		if err != nil {
 			controllers.WriteErrorResponse(w, err)
 			return
 		}
 
-		system.RemoveAllRetrySchedules(job.ID, string(backup.Disk))
+		system.RemoveAllRetrySchedules(job.ID, string(backup.Database))
 
 		execPath, err := os.Executable()
 		if err != nil {
@@ -87,7 +68,7 @@ func ExtJsJobRunHandler(storeInstance *store.Store) http.HandlerFunc {
 			return
 		}
 
-		cmd := exec.Command(execPath, "-job", job.ID, "--job-mode", string(backup.Disk), "-web")
+		cmd := exec.Command(execPath, "-job", job.ID, "--job-mode", string(backup.Database), "-web")
 		cmd.Env = os.Environ()
 		err = cmd.Start()
 		if err != nil {
@@ -140,50 +121,19 @@ func ExtJsJobHandler(storeInstance *store.Store) http.HandlerFunc {
 			}
 		}
 
-		maxDirEntries, err := strconv.Atoi(r.FormValue("max-dir-entries"))
-		if err != nil {
-			if r.FormValue("max-dir-entries") == "" {
-				maxDirEntries = 1048576
-			} else {
-				controllers.WriteErrorResponse(w, err)
-				return
-			}
-		}
-
-		newJob := types.Job{
+		newJob := types.DatabaseJob{
 			ID:               r.FormValue("id"),
 			Store:            r.FormValue("store"),
-			SourceMode:       r.FormValue("sourcemode"),
-			ReadMode:         r.FormValue("readmode"),
-			Mode:             r.FormValue("mode"),
 			Target:           r.FormValue("target"),
-			Subpath:          r.FormValue("subpath"),
 			Schedule:         r.FormValue("schedule"),
 			Comment:          r.FormValue("comment"),
 			Namespace:        r.FormValue("ns"),
-			MaxDirEntries:    maxDirEntries,
 			NotificationMode: r.FormValue("notification-mode"),
 			Retry:            retry,
 			RetryInterval:    retryInterval,
-			Exclusions:       []types.Exclusion{},
 		}
 
-		rawExclusions := r.FormValue("rawexclusions")
-		for _, exclusion := range strings.Split(rawExclusions, "\n") {
-			exclusion = strings.TrimSpace(exclusion)
-			if exclusion == "" {
-				continue
-			}
-
-			exclusionInst := types.Exclusion{
-				Path:  exclusion,
-				JobID: newJob.ID,
-			}
-
-			newJob.Exclusions = append(newJob.Exclusions, exclusionInst)
-		}
-
-		err = storeInstance.Database.CreateJob(nil, newJob)
+		err = storeInstance.Database.CreateDatabaseJob(nil, newJob)
 		if err != nil {
 			controllers.WriteErrorResponse(w, err)
 			return
@@ -206,7 +156,7 @@ func ExtJsJobSingleHandler(storeInstance *store.Store) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 
 		if r.Method == http.MethodPut {
-			job, err := storeInstance.Database.GetJob(utils.DecodePath(r.PathValue("job")))
+			job, err := storeInstance.Database.GetDatabaseJob(utils.DecodePath(r.PathValue("job")))
 			if err != nil {
 				controllers.WriteErrorResponse(w, err)
 				return
@@ -220,15 +170,6 @@ func ExtJsJobSingleHandler(storeInstance *store.Store) http.HandlerFunc {
 
 			if r.FormValue("store") != "" {
 				job.Store = r.FormValue("store")
-			}
-			if r.FormValue("mode") != "" {
-				job.Mode = r.FormValue("mode")
-			}
-			if r.FormValue("sourcemode") != "" {
-				job.SourceMode = r.FormValue("sourcemode")
-			}
-			if r.FormValue("readmode") != "" {
-				job.ReadMode = r.FormValue("readmode")
 			}
 			if r.FormValue("target") != "" {
 				job.Target = r.FormValue("target")
@@ -253,51 +194,17 @@ func ExtJsJobSingleHandler(storeInstance *store.Store) http.HandlerFunc {
 				retryInterval = 1
 			}
 
-			maxDirEntries, err := strconv.Atoi(r.FormValue("max-dir-entries"))
-			if err != nil {
-				maxDirEntries = 1048576
-			}
-
 			job.Retry = retry
 			job.RetryInterval = retryInterval
-			job.MaxDirEntries = maxDirEntries
-
-			job.Subpath = r.FormValue("subpath")
 			job.Namespace = r.FormValue("ns")
-			job.Exclusions = []types.Exclusion{}
-
-			if r.FormValue("rawexclusions") != "" {
-				rawExclusions := r.FormValue("rawexclusions")
-				for _, exclusion := range strings.Split(rawExclusions, "\n") {
-					exclusion = strings.TrimSpace(exclusion)
-					if exclusion == "" {
-						continue
-					}
-
-					exclusionInst := types.Exclusion{
-						Path:  exclusion,
-						JobID: job.ID,
-					}
-
-					job.Exclusions = append(job.Exclusions, exclusionInst)
-				}
-			}
 
 			if delArr, ok := r.Form["delete"]; ok {
 				for _, attr := range delArr {
 					switch attr {
 					case "store":
 						job.Store = ""
-					case "mode":
-						job.Mode = ""
-					case "sourcemode":
-						job.SourceMode = ""
-					case "readmode":
-						job.ReadMode = ""
 					case "target":
 						job.Target = ""
-					case "subpath":
-						job.Subpath = ""
 					case "schedule":
 						job.Schedule = ""
 					case "comment":
@@ -308,17 +215,13 @@ func ExtJsJobSingleHandler(storeInstance *store.Store) http.HandlerFunc {
 						job.Retry = 0
 					case "retry-interval":
 						job.RetryInterval = 1
-					case "max-dir-entries":
-						job.MaxDirEntries = 1048576
 					case "notification-mode":
 						job.NotificationMode = ""
-					case "rawexclusions":
-						job.Exclusions = []types.Exclusion{}
 					}
 				}
 			}
 
-			err = storeInstance.Database.UpdateJob(nil, job)
+			err = storeInstance.Database.UpdateDatabaseJob(nil, job)
 			if err != nil {
 				controllers.WriteErrorResponse(w, err)
 				return
@@ -332,7 +235,7 @@ func ExtJsJobSingleHandler(storeInstance *store.Store) http.HandlerFunc {
 		}
 
 		if r.Method == http.MethodGet {
-			job, err := storeInstance.Database.GetJob(utils.DecodePath(r.PathValue("job")))
+			job, err := storeInstance.Database.GetDatabaseJob(utils.DecodePath(r.PathValue("job")))
 			if err != nil {
 				controllers.WriteErrorResponse(w, err)
 				return
@@ -347,7 +250,7 @@ func ExtJsJobSingleHandler(storeInstance *store.Store) http.HandlerFunc {
 		}
 
 		if r.Method == http.MethodDelete {
-			err := storeInstance.Database.DeleteJob(nil, utils.DecodePath(r.PathValue("job")))
+			err := storeInstance.Database.DeleteDatabaseJob(nil, utils.DecodePath(r.PathValue("job")))
 			if err != nil {
 				controllers.WriteErrorResponse(w, err)
 				return

@@ -41,6 +41,27 @@ func prepareBackupCommand(ctx context.Context, job types.Job, storeInstance *sto
 	return cmd, nil
 }
 
+func prepareDBBackupCommand(ctx context.Context, job types.DatabaseJob, targetHost string, storeInstance *store.Store, srcPath string) (*exec.Cmd, error) {
+	if srcPath == "" {
+		return nil, fmt.Errorf("RunBackup: source path is required")
+	}
+
+	jobStore := fmt.Sprintf("%s@localhost:%s", proxmox.Session.APIToken.TokenId, job.Store)
+	if jobStore == "@localhost:" {
+		return nil, fmt.Errorf("RunBackup: invalid job store configuration")
+	}
+
+	cmdArgs := buildDBCommandArgs(storeInstance, job, srcPath, jobStore, targetHost)
+	if len(cmdArgs) == 0 {
+		return nil, fmt.Errorf("RunBackup: failed to build command arguments")
+	}
+
+	cmd := exec.CommandContext(ctx, "/usr/bin/prlimit", cmdArgs...)
+	cmd.Env = buildCommandEnv(storeInstance)
+
+	return cmd, nil
+}
+
 func getBackupId(isAgent bool, targetName string) (string, error) {
 	if !isAgent {
 		hostname, err := os.Hostname()
@@ -121,6 +142,33 @@ func buildCommandArgs(storeInstance *store.Store, job types.Job, srcPath string,
 	// Add namespace if specified
 	if job.Namespace != "" {
 		_ = CreateNamespace(job.Namespace, job, storeInstance)
+		cmdArgs = append(cmdArgs, "--ns", job.Namespace)
+	}
+
+	return cmdArgs
+}
+
+func buildDBCommandArgs(storeInstance *store.Store, job types.DatabaseJob, srcPath string, jobStore string, backupId string) []string {
+	if srcPath == "" || jobStore == "" || backupId == "" {
+		return nil
+	}
+
+	detectionMode := "--change-detection-mode=data"
+
+	cmdArgs := []string{
+		"--nofile=1024:1024",
+		"/usr/bin/proxmox-backup-client",
+		"backup",
+		fmt.Sprintf("%s.pxar:%s", strings.ReplaceAll(job.Target, " ", "-"), srcPath),
+		"--repository", jobStore,
+		detectionMode,
+		"--backup-id", backupId,
+		"--crypt-mode=none",
+	}
+
+	// Add namespace if specified
+	if job.Namespace != "" {
+		_ = CreateDBNamespace(job.Namespace, job, storeInstance)
 		cmdArgs = append(cmdArgs, "--ns", job.Namespace)
 	}
 

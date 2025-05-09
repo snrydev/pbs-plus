@@ -13,12 +13,11 @@ import (
 	"time"
 
 	"github.com/pbs-plus/pbs-plus/internal/store/constants"
-	"github.com/pbs-plus/pbs-plus/internal/store/types"
 )
 
-func generateTimer(job types.Job) error {
-	if strings.Contains(job.ID, "/") || strings.Contains(job.ID, "\\") || strings.Contains(job.ID, "..") {
-		return fmt.Errorf("generateTimer: invalid job ID -> %s", job.ID)
+func generateTimer(id string, mode string, schedule string) error {
+	if strings.Contains(id, "/") || strings.Contains(id, "\\") || strings.Contains(id, "..") {
+		return fmt.Errorf("generateTimer: invalid id -> %s", id)
 	}
 
 	content := fmt.Sprintf(`[Unit]
@@ -29,9 +28,14 @@ OnCalendar=%s
 Persistent=false
 
 [Install]
-WantedBy=timers.target`, job.ID, job.Schedule)
+WantedBy=timers.target`, id, schedule)
 
-	filePath := fmt.Sprintf("pbs-plus-job-%s.timer", strings.ReplaceAll(job.ID, " ", "-"))
+	svcId := strings.ReplaceAll(id, " ", "-")
+	if mode == "database" {
+		svcId = "db-" + svcId
+	}
+
+	filePath := fmt.Sprintf("pbs-plus-job-%s.timer", svcId)
 	fullPath := filepath.Join(constants.TimerBasePath, filePath)
 
 	file, err := os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
@@ -49,9 +53,9 @@ WantedBy=timers.target`, job.ID, job.Schedule)
 	return nil
 }
 
-func generateService(job types.Job) error {
-	if strings.Contains(job.ID, "/") || strings.Contains(job.ID, "\\") || strings.Contains(job.ID, "..") {
-		return fmt.Errorf("generateService: invalid job ID -> %s", job.ID)
+func generateService(id string, mode string) error {
+	if strings.Contains(id, "/") || strings.Contains(id, "\\") || strings.Contains(id, "..") {
+		return fmt.Errorf("generateService: invalid id -> %s", id)
 	}
 
 	content := fmt.Sprintf(`[Unit]
@@ -61,9 +65,14 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/pbs-plus -job="%s"`, job.ID, job.ID)
+ExecStart=/usr/bin/pbs-plus -job="%s" --job-mode="%s"`, id, id, mode)
 
-	filePath := fmt.Sprintf("pbs-plus-job-%s.service", strings.ReplaceAll(job.ID, " ", "-"))
+	svcId := strings.ReplaceAll(id, " ", "-")
+	if mode == "database" {
+		svcId = "db-" + svcId
+	}
+
+	filePath := fmt.Sprintf("pbs-plus-job-%s.service", svcId)
 	fullPath := filepath.Join(constants.TimerBasePath, filePath)
 
 	file, err := os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
@@ -80,11 +89,16 @@ ExecStart=/usr/bin/pbs-plus -job="%s"`, job.ID, job.ID)
 	return nil
 }
 
-func DeleteSchedule(id string) error {
-	svcFilePath := fmt.Sprintf("pbs-plus-job-%s.service", strings.ReplaceAll(id, " ", "-"))
+func DeleteSchedule(id string, mode string) error {
+	svcId := strings.ReplaceAll(id, " ", "-")
+	if mode == "database" {
+		svcId = "db-" + svcId
+	}
+
+	svcFilePath := fmt.Sprintf("pbs-plus-job-%s.service", svcId)
 	svcFullPath := filepath.Join(constants.TimerBasePath, svcFilePath)
 
-	timerFilePath := fmt.Sprintf("pbs-plus-job-%s.timer", strings.ReplaceAll(id, " ", "-"))
+	timerFilePath := fmt.Sprintf("pbs-plus-job-%s.timer", svcId)
 	timerFullPath := filepath.Join(constants.TimerBasePath, timerFilePath)
 
 	cmd := exec.Command("/usr/bin/systemctl", "stop", timerFilePath)
@@ -127,7 +141,7 @@ var lastSchedMux sync.Mutex
 var lastSchedUpdate time.Time
 var lastSchedString []byte
 
-func GetNextSchedule(job types.Job) (*time.Time, error) {
+func GetNextSchedule(id string, mode string) (*time.Time, error) {
 	var output []byte
 
 	lastSchedMux.Lock()
@@ -152,9 +166,14 @@ func GetNextSchedule(job types.Job) (*time.Time, error) {
 	scanner := bufio.NewScanner(strings.NewReader(string(output)))
 	layout := "Mon 2006-01-02 15:04:05 MST"
 
+	svcId := strings.ReplaceAll(id, " ", "-")
+	if mode == "database" {
+		svcId = "db-" + svcId
+	}
+
 	// Look for both the primary timer and any retry timer entries.
-	primaryTimer := fmt.Sprintf("pbs-plus-job-%s.timer", strings.ReplaceAll(job.ID, " ", "-"))
-	retryPrefix := fmt.Sprintf("pbs-plus-job-%s-retry", strings.ReplaceAll(job.ID, " ", "-"))
+	primaryTimer := fmt.Sprintf("pbs-plus-job-%s.timer", svcId)
+	retryPrefix := fmt.Sprintf("pbs-plus-job-%s-retry", svcId)
 
 	var nextTimes []time.Time
 	for scanner.Scan() {
@@ -199,18 +218,23 @@ func GetNextSchedule(job types.Job) (*time.Time, error) {
 	return &earliest, nil
 }
 
-func SetSchedule(job types.Job) error {
-	if strings.Contains(job.ID, "/") || strings.Contains(job.ID, "\\") || strings.Contains(job.ID, "..") {
-		return fmt.Errorf("SetSchedule: invalid job ID -> %s", job.ID)
+func SetSchedule(id string, mode string, schedule string) error {
+	if strings.Contains(id, "/") || strings.Contains(id, "\\") || strings.Contains(id, "..") {
+		return fmt.Errorf("SetSchedule: invalid id -> %s", id)
 	}
 
-	svcPath := fmt.Sprintf("pbs-plus-job-%s.service", strings.ReplaceAll(job.ID, " ", "-"))
+	svcId := strings.ReplaceAll(id, " ", "-")
+	if mode == "database" {
+		svcId = "db-" + svcId
+	}
+
+	svcPath := fmt.Sprintf("pbs-plus-job-%s.service", svcId)
 	fullSvcPath := filepath.Join(constants.TimerBasePath, svcPath)
 
-	timerPath := fmt.Sprintf("pbs-plus-job-%s.timer", strings.ReplaceAll(job.ID, " ", "-"))
+	timerPath := fmt.Sprintf("pbs-plus-job-%s.timer", svcId)
 	fullTimerPath := filepath.Join(constants.TimerBasePath, timerPath)
 
-	if job.Schedule == "" {
+	if schedule == "" {
 		cmd := exec.Command("/usr/bin/systemctl", "disable", "--now", timerPath)
 		cmd.Env = os.Environ()
 		_ = cmd.Run()
@@ -218,12 +242,12 @@ func SetSchedule(job types.Job) error {
 		_ = os.RemoveAll(fullSvcPath)
 		_ = os.RemoveAll(fullTimerPath)
 	} else {
-		err := generateService(job)
+		err := generateService(id, mode)
 		if err != nil {
 			return fmt.Errorf("SetSchedule: error generating service -> %w", err)
 		}
 
-		err = generateTimer(job)
+		err = generateTimer(id, mode, schedule)
 		if err != nil {
 			return fmt.Errorf("SetSchedule: error generating timer -> %v", err)
 		}
@@ -236,7 +260,7 @@ func SetSchedule(job types.Job) error {
 		return fmt.Errorf("SetSchedule: error running daemon reload -> %v", err)
 	}
 
-	if job.Schedule == "" {
+	if schedule == "" {
 		return nil
 	}
 

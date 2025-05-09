@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/pbs-plus/pbs-plus/internal/store/types"
 	"github.com/pbs-plus/pbs-plus/internal/syslog"
 	"github.com/pbs-plus/pbs-plus/internal/utils/safemap"
 )
@@ -19,8 +18,8 @@ import (
 func (proxmoxSess *ProxmoxSession) GetJobTask(
 	ctx context.Context,
 	readyChan chan struct{},
-	job types.Job,
-	target types.Target,
+	jobStore string,
+	backupId string,
 ) (Task, error) {
 	tasksParentPath := "/var/log/proxmox-backup/tasks"
 	watcher, err := fsnotify.NewWatcher()
@@ -90,23 +89,7 @@ func (proxmoxSess *ProxmoxSession) GetJobTask(
 		return Task{}, fmt.Errorf("failed to walk folder: %w", err)
 	}
 
-	hostname, err := os.Hostname()
-	if err != nil {
-		hostnameFile, err := os.ReadFile("/etc/hostname")
-		if err != nil {
-			hostname = "localhost"
-		} else {
-			hostname = strings.TrimSpace(string(hostnameFile))
-		}
-	}
-
-	isAgent := strings.HasPrefix(target.Path, "agent://")
-	backupId := hostname
-	if isAgent {
-		backupId = strings.TrimSpace(strings.Split(target.Name, " - ")[0])
-	}
-
-	searchString := fmt.Sprintf(":backup:%s%shost-%s", encodeToHexEscapes(job.Store), encodeToHexEscapes(":"), encodeToHexEscapes(backupId))
+	searchString := fmt.Sprintf(":backup:%s%shost-%s", encodeToHexEscapes(jobStore), encodeToHexEscapes(":"), encodeToHexEscapes(backupId))
 
 	syslog.L.Info().WithMessage("ready to start backup").Write()
 	close(readyChan)

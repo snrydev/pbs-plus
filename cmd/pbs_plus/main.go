@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pbs-plus/pbs-plus/internal/auth/certificates"
@@ -23,6 +24,8 @@ import (
 	"github.com/pbs-plus/pbs-plus/internal/proxy"
 	"github.com/pbs-plus/pbs-plus/internal/proxy/controllers/agents"
 	"github.com/pbs-plus/pbs-plus/internal/proxy/controllers/arpc"
+	"github.com/pbs-plus/pbs-plus/internal/proxy/controllers/database_jobs"
+	"github.com/pbs-plus/pbs-plus/internal/proxy/controllers/database_targets"
 	"github.com/pbs-plus/pbs-plus/internal/proxy/controllers/exclusions"
 	"github.com/pbs-plus/pbs-plus/internal/proxy/controllers/jobs"
 	"github.com/pbs-plus/pbs-plus/internal/proxy/controllers/plus"
@@ -36,6 +39,7 @@ import (
 	"github.com/pbs-plus/pbs-plus/internal/store/proxmox"
 	"github.com/pbs-plus/pbs-plus/internal/store/system"
 	"github.com/pbs-plus/pbs-plus/internal/syslog"
+	"github.com/pbs-plus/pbs-plus/internal/utils"
 
 	"net/http/pprof"
 
@@ -66,6 +70,7 @@ func main() {
 
 	var extExclusions arrayFlags
 	jobRun := flag.String("job", "", "Job ID to execute")
+	jobMode := flag.String("job-mode", "", "Mode of Job")
 	retryAttempts := flag.String("retry", "", "Current attempt number")
 	webRun := flag.Bool("web", false, "Job executed from Web UI")
 	flag.Var(&extExclusions, "skip", "Extra exclusions")
@@ -134,24 +139,57 @@ func main() {
 			return
 		}
 
-		jobTask, err := storeInstance.Database.GetJob(*jobRun)
-		if err != nil {
-			syslog.L.Error(err).WithField("jobId", *jobRun).Write()
-			return
+		var args *jobrpc.QueueArgs
+
+		if *jobMode == string(backup.Disk) {
+			jobTask, err := storeInstance.Database.GetJob(*jobRun)
+			if err != nil {
+				syslog.L.Error(err).WithField("jobId", *jobRun).Write()
+				return
+			}
+
+			if retryAttempts == nil || *retryAttempts == "" {
+				system.RemoveAllRetrySchedules(jobTask.ID, string(backup.Disk))
+			}
+
+			arrExtExc := []string(extExclusions)
+
+			args = &jobrpc.QueueArgs{
+				Job:             jobTask,
+				Mode:            backup.Disk,
+				SkipCheck:       true,
+				Web:             *webRun,
+				ExtraExclusions: arrExtExc,
+			}
+		} else if *jobMode == string(backup.Database) {
+			jobTask, err := storeInstance.Database.GetDatabaseJob(*jobRun)
+			if err != nil {
+				syslog.L.Error(err).WithField("jobId", *jobRun).Write()
+				return
+			}
+
+			jobTarget, err := storeInstance.Database.GetDatabaseTarget(jobTask.Target)
+			if err != nil {
+				syslog.L.Error(err).WithField("jobId", *jobRun).Write()
+				return
+			}
+
+			if retryAttempts == nil || *retryAttempts == "" {
+				system.RemoveAllRetrySchedules(jobTask.ID, string(backup.Database))
+			}
+
+			arrExtExc := []string(extExclusions)
+
+			args = &jobrpc.QueueArgs{
+				DatabaseJob:     jobTask,
+				DatabaseTarget:  jobTarget,
+				Mode:            backup.Database,
+				SkipCheck:       true,
+				Web:             *webRun,
+				ExtraExclusions: arrExtExc,
+			}
 		}
 
-		if retryAttempts == nil || *retryAttempts == "" {
-			system.RemoveAllRetrySchedules(jobTask)
-		}
-
-		arrExtExc := []string(extExclusions)
-
-		args := &jobrpc.QueueArgs{
-			Job:             jobTask,
-			SkipCheck:       true,
-			Web:             *webRun,
-			ExtraExclusions: arrExtExc,
-		}
 		var reply jobrpc.QueueReply
 
 		conn, err := net.DialTimeout("unix", constants.JobMutateSocketPath, 5*time.Minute)
@@ -191,10 +229,16 @@ func main() {
 		syslog.L.Error(err).WithMessage("failed to get all queued jobs").Write()
 	}
 
+	queuedDbJobs, err := storeInstance.Database.GetAllQueuedDatabaseJobs()
+	if err != nil {
+		syslog.L.Error(err).WithMessage("failed to get all queued db jobs").Write()
+	}
+
 	tx, err := storeInstance.Database.NewTransaction()
 	if err == nil {
 		for _, queuedJob := range queuedJobs {
-			task, err := proxmox.GenerateTaskErrorFile(queuedJob, fmt.Errorf("server was restarted before job started during queue"), nil)
+			targetName := strings.TrimSpace(strings.Split(queuedJob.Target, " - ")[0])
+			task, err := proxmox.GenerateTaskErrorFile(targetName, queuedJob.Store, fmt.Errorf("server was restarted before job started during queue"), nil)
 			if err != nil {
 				continue
 			}
@@ -210,7 +254,37 @@ func main() {
 				continue
 			}
 		}
+		for _, queuedJob := range queuedDbJobs {
+			task, err := proxmox.GenerateTaskErrorFile(queuedJob.TargetHost, queuedJob.Store, fmt.Errorf("server was restarted before job started during queue"), nil)
+			if err != nil {
+				continue
+			}
+
+			queueTaskPath, err := proxmox.GetLogPath(queuedJob.LastRunUpid)
+			if err == nil {
+				os.Remove(queueTaskPath)
+			}
+
+			queuedJob.LastRunUpid = task.UPID
+			err = storeInstance.Database.UpdateDatabaseJob(tx, queuedJob)
+			if err != nil {
+				continue
+			}
+		}
 		tx.Commit()
+	}
+
+	if _, err := os.Lstat(constants.DatabaseSecretsFile); err != nil {
+		if os.IsNotExist(err) {
+			secret, err := utils.GenerateRandomString(32)
+			if err == nil {
+				secretFile, err := os.Create(constants.DatabaseSecretsFile)
+				if err == nil {
+					_, _ = secretFile.WriteString(secret)
+					secretFile.Close()
+				}
+			}
+		}
 	}
 
 	certOpts := certificates.DefaultOptions()
@@ -386,16 +460,28 @@ func main() {
 	mux.HandleFunc("/api2/json/d2d/exclusion", mw.AgentOrServer(storeInstance, mw.CORS(storeInstance, exclusions.D2DExclusionHandler(storeInstance))))
 	mux.HandleFunc("/api2/json/d2d/agent-log", mw.AgentOnly(storeInstance, mw.CORS(storeInstance, agents.AgentLogHandler(storeInstance))))
 
+	mux.HandleFunc("/api2/json/db/backup", mw.ServerOnly(storeInstance, mw.CORS(storeInstance, database_jobs.DBJobHandler(storeInstance))))
+	mux.HandleFunc("/api2/json/db/target", mw.ServerOnly(storeInstance, mw.CORS(storeInstance, database_targets.DBTargetHandler(storeInstance))))
+
 	// ExtJS routes with path parameters
 	mux.HandleFunc("/api2/extjs/d2d/backup/{job}", mw.ServerOnly(storeInstance, mw.CORS(storeInstance, jobs.ExtJsJobRunHandler(storeInstance))))
+	mux.HandleFunc("/api2/extjs/db/backup/{job}", mw.ServerOnly(storeInstance, mw.CORS(storeInstance, database_jobs.ExtJsJobRunHandler(storeInstance))))
+
 	mux.HandleFunc("/api2/extjs/config/d2d-target", mw.ServerOnly(storeInstance, mw.CORS(storeInstance, targets.ExtJsTargetHandler(storeInstance))))
 	mux.HandleFunc("/api2/extjs/config/d2d-target/{target}", mw.ServerOnly(storeInstance, mw.CORS(storeInstance, targets.ExtJsTargetSingleHandler(storeInstance))))
+
+	mux.HandleFunc("/api2/extjs/config/db-target", mw.ServerOnly(storeInstance, mw.CORS(storeInstance, database_targets.ExtJsTargetHandler(storeInstance))))
+	mux.HandleFunc("/api2/extjs/config/db-target/{target}", mw.ServerOnly(storeInstance, mw.CORS(storeInstance, database_targets.ExtJsTargetSingleHandler(storeInstance))))
+
 	mux.HandleFunc("/api2/extjs/config/d2d-token", mw.ServerOnly(storeInstance, mw.CORS(storeInstance, tokens.ExtJsTokenHandler(storeInstance))))
 	mux.HandleFunc("/api2/extjs/config/d2d-token/{token}", mw.ServerOnly(storeInstance, mw.CORS(storeInstance, tokens.ExtJsTokenSingleHandler(storeInstance))))
 	mux.HandleFunc("/api2/extjs/config/d2d-exclusion", mw.ServerOnly(storeInstance, mw.CORS(storeInstance, exclusions.ExtJsExclusionHandler(storeInstance))))
 	mux.HandleFunc("/api2/extjs/config/d2d-exclusion/{exclusion}", mw.ServerOnly(storeInstance, mw.CORS(storeInstance, exclusions.ExtJsExclusionSingleHandler(storeInstance))))
 	mux.HandleFunc("/api2/extjs/config/disk-backup-job", mw.ServerOnly(storeInstance, mw.CORS(storeInstance, jobs.ExtJsJobHandler(storeInstance))))
 	mux.HandleFunc("/api2/extjs/config/disk-backup-job/{job}", mw.ServerOnly(storeInstance, mw.CORS(storeInstance, jobs.ExtJsJobSingleHandler(storeInstance))))
+
+	mux.HandleFunc("/api2/extjs/config/db-backup-job", mw.ServerOnly(storeInstance, mw.CORS(storeInstance, database_jobs.ExtJsJobHandler(storeInstance))))
+	mux.HandleFunc("/api2/extjs/config/db-backup-job/{job}", mw.ServerOnly(storeInstance, mw.CORS(storeInstance, database_jobs.ExtJsJobSingleHandler(storeInstance))))
 
 	// aRPC route
 	mux.HandleFunc("/plus/arpc", mw.AgentOnly(storeInstance, arpc.ARPCHandler(storeInstance)))

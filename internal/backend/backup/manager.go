@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -58,26 +59,49 @@ func (jq *Manager) Enqueue(job *BackupOperation) {
 		return
 	}
 
-	var err error
-	lock, _ := jq.locks.LoadOrStore(job.job.ID, &sync.Mutex{})
+	switch job.mode {
+	case Disk:
+		lock, _ := jq.locks.LoadOrStore(job.job.ID, &sync.Mutex{})
 
-	if locked := lock.TryLock(); !locked {
-		jq.CreateError(job, ErrOneInstance)
-		return
-	}
-
-	job.lock = lock
-
-	queueTask, err := proxmox.GenerateQueuedTask(job.job, job.web)
-	if err != nil {
-		syslog.L.Error(err).WithMessage("failed to create queue task, not fatal").Write()
-	} else {
-		if err := updateJobStatus(false, 0, job.job, queueTask.Task, job.storeInstance); err != nil {
-			syslog.L.Error(err).WithMessage("failed to set queue task, not fatal").Write()
+		if locked := lock.TryLock(); !locked {
+			jq.CreateError(job, ErrOneInstance)
+			return
 		}
-	}
 
-	job.queueTask = &queueTask
+		job.lock = lock
+
+		targetName := strings.TrimSpace(strings.Split(job.job.Target, " - ")[0])
+		queueTask, err := proxmox.GenerateQueuedTask(targetName, job.job.Store, job.web)
+		if err != nil {
+			syslog.L.Error(err).WithMessage("failed to create queue task, not fatal").Write()
+		} else {
+			if err := updateJobStatus(false, 0, job.job, queueTask.Task, job.storeInstance); err != nil {
+				syslog.L.Error(err).WithMessage("failed to set queue task, not fatal").Write()
+			}
+		}
+
+		job.queueTask = &queueTask
+	case Database:
+		lock, _ := jq.locks.LoadOrStore(job.dbJob.ID, &sync.Mutex{})
+
+		if locked := lock.TryLock(); !locked {
+			jq.CreateError(job, ErrOneInstance)
+			return
+		}
+
+		job.lock = lock
+
+		queueTask, err := proxmox.GenerateQueuedTask(job.dbTarget.Host, job.dbJob.Store, job.web)
+		if err != nil {
+			syslog.L.Error(err).WithMessage("failed to create queue task, not fatal").Write()
+		} else {
+			if err := updateDBJobStatus(false, 0, job.dbJob, queueTask.Task, job.storeInstance); err != nil {
+				syslog.L.Error(err).WithMessage("failed to set queue task, not fatal").Write()
+			}
+		}
+
+		job.queueTask = &queueTask
+	}
 
 	select {
 	case jq.jobs <- job:
@@ -128,27 +152,67 @@ func (jq *Manager) worker() {
 func (jq *Manager) CreateError(op *BackupOperation, err error) {
 	syslog.L.Error(err).WithField("jobId", op.job.ID).Write()
 
+	datastore := ""
+	backupId := ""
+	jobId := ""
+	sourceMode := ""
+
+	switch op.mode {
+	case Disk:
+		jobId = op.job.ID
+		targetName := strings.TrimSpace(strings.Split(op.job.Target, " - ")[0])
+		backupId = targetName
+		datastore = op.job.Store
+		sourceMode = op.job.SourceMode
+	case Database:
+		jobId = op.dbJob.ID
+		backupId = op.dbTarget.Host
+		datastore = op.dbJob.Store
+		sourceMode = string(op.dbTarget.Type)
+	}
+
 	if !errors.Is(err, ErrOneInstance) {
-		if task, err := proxmox.GenerateTaskErrorFile(op.job, err, []string{"Error handling from a scheduled job run request", "Job ID: " + op.job.ID, "Source Mode: " + op.job.SourceMode}); err != nil {
-			syslog.L.Error(err).WithField("jobId", op.job.ID).Write()
+		if task, err := proxmox.GenerateTaskErrorFile(backupId, datastore, err, []string{"Error handling from a scheduled job run request", "Job ID: " + jobId, "Source Mode: " + sourceMode}); err != nil {
+			syslog.L.Error(err).WithField("jobId", jobId).Write()
 		} else {
 			// Update job status
-			latestJob, err := op.storeInstance.Database.GetJob(op.job.ID)
-			if err != nil {
-				latestJob = op.job
-			}
+			if op.mode == Disk {
+				latestJob, err := op.storeInstance.Database.GetJob(op.job.ID)
+				if err != nil {
+					latestJob = op.job
+				}
 
-			latestJob.LastRunUpid = task.UPID
-			latestJob.LastRunState = task.Status
-			latestJob.LastRunEndtime = task.EndTime
+				latestJob.LastRunUpid = task.UPID
+				latestJob.LastRunState = task.Status
+				latestJob.LastRunEndtime = task.EndTime
 
-			err = op.storeInstance.Database.UpdateJob(nil, latestJob)
-			if err != nil {
-				syslog.L.Error(err).WithField("jobId", latestJob.ID).WithField("upid", task.UPID).Write()
+				err = op.storeInstance.Database.UpdateJob(nil, latestJob)
+				if err != nil {
+					syslog.L.Error(err).WithField("jobId", latestJob.ID).WithField("upid", task.UPID).Write()
+				}
+
+				if err := system.SetRetrySchedule(op.job.ID, string(Disk), op.job.Retry, op.job.RetryInterval, op.extraExclusions); err != nil {
+					syslog.L.Error(err).WithField("jobId", op.job.ID).Write()
+				}
+			} else if op.mode == Database {
+				latestJob, err := op.storeInstance.Database.GetDatabaseJob(op.dbJob.ID)
+				if err != nil {
+					latestJob = op.dbJob
+				}
+
+				latestJob.LastRunUpid = task.UPID
+				latestJob.LastRunState = task.Status
+				latestJob.LastRunEndtime = task.EndTime
+
+				err = op.storeInstance.Database.UpdateDatabaseJob(nil, latestJob)
+				if err != nil {
+					syslog.L.Error(err).WithField("jobId", latestJob.ID).WithField("upid", task.UPID).Write()
+				}
+
+				if err := system.SetRetrySchedule(op.dbJob.ID, string(Database), op.dbJob.Retry, op.dbJob.RetryInterval, op.extraExclusions); err != nil {
+					syslog.L.Error(err).WithField("jobId", op.job.ID).Write()
+				}
 			}
-		}
-		if err := system.SetRetrySchedule(op.job, op.extraExclusions); err != nil {
-			syslog.L.Error(err).WithField("jobId", op.job.ID).Write()
 		}
 	}
 }

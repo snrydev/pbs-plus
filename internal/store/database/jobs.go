@@ -132,7 +132,7 @@ func (database *Database) CreateJob(job types.Job) error {
 		}
 	}
 
-	if err := system.SetSchedule(job); err != nil {
+	if err := system.SetSchedule(job.ID, job.Schedule); err != nil {
 		syslog.L.Error(err).WithField("id", job.ID).Write()
 	}
 
@@ -237,7 +237,7 @@ func (database *Database) getJob(id string) (types.Job, error) {
 	}
 
 	// Get next schedule
-	nextSchedule, err := system.GetNextSchedule(job)
+	nextSchedule, err := system.GetNextSchedule(job.ID)
 	if err == nil && nextSchedule != nil {
 		nextSchedUnix := nextSchedule.Unix()
 		job.NextRun = nextSchedUnix
@@ -293,7 +293,7 @@ func (database *Database) UpdateJob(job types.Job) error {
 		}
 	}
 
-	if err := system.SetSchedule(job); err != nil {
+	if err := system.SetSchedule(job.ID, job.Schedule); err != nil {
 		syslog.L.Error(err).WithField("id", job.ID).Write()
 	}
 
