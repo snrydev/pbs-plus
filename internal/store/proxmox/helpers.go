@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/pbs-plus/pbs-plus/internal/store/constants"
-	"github.com/pbs-plus/pbs-plus/internal/store/types"
 	"github.com/pbs-plus/pbs-plus/internal/syslog"
 )
 
@@ -99,15 +98,14 @@ type QueuedTask struct {
 	path   string
 }
 
-func GenerateQueuedTask(job types.Job, web bool) (QueuedTask, error) {
+func GenerateQueuedTask(backupId string, datastore string, web bool) (QueuedTask, error) {
 	if Session.APIToken == nil {
 		return QueuedTask{}, errors.New("session api token is missing")
 	}
 
 	authId := Session.APIToken.TokenId
 
-	targetName := strings.TrimSpace(strings.Split(job.Target, " - ")[0])
-	wid := fmt.Sprintf("%s%shost-%s", encodeToHexEscapes(job.Store), encodeToHexEscapes(":"), encodeToHexEscapes(targetName))
+	wid := fmt.Sprintf("%s%shost-%s", encodeToHexEscapes(datastore), encodeToHexEscapes(":"), encodeToHexEscapes(backupId))
 	startTime := fmt.Sprintf("%08X", uint32(time.Now().Unix()))
 
 	wtype := "backup"
@@ -199,15 +197,14 @@ func (task *QueuedTask) Close() {
 	task.closed.Store(true)
 }
 
-func GenerateTaskErrorFile(job types.Job, pbsError error, additionalData []string) (Task, error) {
+func GenerateTaskErrorFile(backupId string, datastore string, pbsError error, additionalData []string) (Task, error) {
 	if Session.APIToken == nil {
 		return Task{}, errors.New("session api token is missing")
 	}
 
 	authId := Session.APIToken.TokenId
 
-	targetName := strings.TrimSpace(strings.Split(job.Target, " - ")[0])
-	wid := fmt.Sprintf("%s%shost-%s", encodeToHexEscapes(job.Store), encodeToHexEscapes(":"), encodeToHexEscapes(targetName))
+	wid := fmt.Sprintf("%s%shost-%s", encodeToHexEscapes(datastore), encodeToHexEscapes(":"), encodeToHexEscapes(backupId))
 	startTime := fmt.Sprintf("%08X", uint32(time.Now().Unix()))
 
 	wtype := "backup"

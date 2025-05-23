@@ -18,6 +18,9 @@ import (
 
 type QueueArgs struct {
 	Job             types.Job
+	DatabaseJob     types.DatabaseJob
+	DatabaseTarget  types.DatabaseTarget
+	Mode            backup.BackupType
 	SkipCheck       bool
 	Web             bool
 	ExtraExclusions []string
@@ -35,14 +38,26 @@ type JobRPCService struct {
 }
 
 func (s *JobRPCService) Queue(args *QueueArgs, reply *QueueReply) error {
-	job, err := backup.NewJob(args.Job, s.Store, args.SkipCheck, args.Web, args.ExtraExclusions)
-	if err != nil {
-		reply.Status = 500
-		reply.Message = err.Error()
-		return nil
+	if args.Mode == backup.Disk {
+		job, err := backup.NewJob(args.Job, s.Store, args.SkipCheck, args.Web, args.ExtraExclusions)
+		if err != nil {
+			reply.Status = 500
+			reply.Message = err.Error()
+			return nil
+		}
+
+		s.Manager.Enqueue(job)
+	} else if args.Mode == backup.Database {
+		job, err := backup.NewDatabaseJob(args.DatabaseJob, args.DatabaseTarget, s.Store, args.SkipCheck, args.Web, args.ExtraExclusions)
+		if err != nil {
+			reply.Status = 500
+			reply.Message = err.Error()
+			return nil
+		}
+
+		s.Manager.Enqueue(job)
 	}
 
-	s.Manager.Enqueue(job)
 	reply.Status = 200
 
 	return nil
